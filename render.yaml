@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: relax-together-server
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build -w server
+    startCommand: npm start -w server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22.17.0
+      - key: CLIENT_URL
+        sync: false # set to your Vercel URL, e.g. https://relax-together.vercel.app

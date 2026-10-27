@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --c-bg: 246 245 251;
+  --c-fg: 22 20 40;
+  --c-muted: 84 82 112;
+  --c-card: 255 255 255;
+  --c-line: 22 20 40;
+  color-scheme: light;
+}
+
+.dark {
+  --c-bg: 7 8 18;
+  --c-fg: 240 240 250;
+  --c-muted: 163 165 194;
+  --c-card: 22 24 44;
+  --c-line: 255 255 255;
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg font-sans text-fg antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+  ::selection {
+    @apply bg-fuchsia-500/30;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply border border-line/10 bg-card/70 shadow-xl shadow-black/5 backdrop-blur-xl dark:bg-card/50 dark:shadow-black/30;
+  }
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-400 focus-visible:ring-offset-2 focus-visible:ring-offset-bg;
+  }
+  .btn {
+    @apply focus-ring inline-flex select-none items-center justify-center gap-2 rounded-xl font-semibold transition active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-violet-600 to-pink-600 text-white shadow-lg shadow-fuchsia-600/25 hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn border border-line/10 bg-line/5 text-fg hover:bg-line/10;
+  }
+  .icon-btn {
+    @apply focus-ring inline-grid h-10 w-10 shrink-0 place-items-center rounded-full text-fg/80 transition hover:bg-line/10 hover:text-fg active:scale-95 disabled:pointer-events-none disabled:opacity-40;
+  }
+  .input {
+    @apply w-full rounded-xl border border-line/15 bg-bg/60 px-4 py-3 text-fg placeholder:text-muted/80 transition focus:border-fuchsia-400/70 focus:outline-none focus:ring-2 focus:ring-fuchsia-400/30 aria-[invalid=true]:border-red-400/70;
+  }
+  .text-gradient {
+    @apply bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-400 bg-clip-text text-transparent;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded-xl bg-line/10 after:absolute after:inset-0 after:-translate-x-full after:animate-shimmer after:bg-gradient-to-r after:from-transparent after:via-line/10 after:to-transparent;
+  }
+}
+
+/* Seek / volume sliders with a gradient fill driven by --progress */
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #8b5cf6, #ec4899) 0 / var(--progress, 0%) 100% no-repeat, rgb(var(--c-line) / 0.15);
+  cursor: pointer;
+}
+.range:focus-visible {
+  outline: 2px solid #e879f9;
+  outline-offset: 4px;
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgb(236 72 153 / 0.35);
+  transition: transform 0.15s;
+}
+.range:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.range::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgb(236 72 153 / 0.35);
+}
+.range:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Music rooms sit on an animated scene: a smaller blur radius keeps the glass cheap to redraw. */
+.music-room .glass {
+  --tw-backdrop-blur: blur(10px);
+}
+
+/* The YouTube API replaces our mount node with an iframe; make it fill the stage. */
+.yt-mount iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--c-line) / 0.2) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
