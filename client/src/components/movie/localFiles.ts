@@ -7,6 +7,8 @@ import type { VideoMeta } from '@shared/types';
  */
 const byFingerprint = new Map<string, { file: File; url: string }>();
 const byMovieId = new Map<string, { file: File; url: string }>();
+/** Per movie: a copy of the file re-headered to play the audio language this person picked. */
+const audioVariants = new Map<string, string>();
 
 function entry(file: File) {
   return { file, url: URL.createObjectURL(file) };
@@ -26,7 +28,16 @@ export function rememberFileForMovie(movieId: string, file: File) {
 export function localCopy(video: VideoMeta | null | undefined): { file: File; url: string } | null {
   const movie = video?.movie;
   if (!video || !movie || movie.kind === 'url') return null;
-  return byFingerprint.get(movie.fingerprint) ?? byMovieId.get(video.videoId) ?? null;
+  const base = byFingerprint.get(movie.fingerprint) ?? byMovieId.get(video.videoId) ?? null;
+  const variant = audioVariants.get(video.videoId);
+  return base && variant ? { file: base.file, url: variant } : base;
+}
+
+/** Play this movie with a different audio language (a Blob from audioTracks.withAudio). */
+export function setAudioVariant(movieId: string, blob: Blob) {
+  const old = audioVariants.get(movieId);
+  if (old) URL.revokeObjectURL(old);
+  audioVariants.set(movieId, URL.createObjectURL(blob));
 }
 
 export const MOVIE_ACCEPT = 'video/*,.mp4,.m4v,.webm,.mkv,.mov,.ogv';

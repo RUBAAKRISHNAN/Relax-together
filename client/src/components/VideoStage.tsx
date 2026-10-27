@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, Film, Loader2, Play } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useImmersive } from '../hooks/useImmersive';
 import type { FloatingReaction } from '../hooks/useRoomSession';
 import type { EngineState, SyncEngine } from '../lib/syncEngine';
 import { loadYouTubeApi } from '../lib/youtubeApi';
@@ -14,13 +15,14 @@ interface VideoStageProps {
   reactions: FloatingReaction[];
 }
 
-const canFullscreen = typeof document !== 'undefined' && !!document.documentElement.requestFullscreen;
-
 export function VideoStage({ engine, state, isHost, reactions }: VideoStageProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mountRef = useRef<HTMLDivElement>(null);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const immersive = useImmersive(wrapperRef, state.isPlaying);
+  const isFullscreen = immersive.active;
+  /** Whether the controls were hidden when this tap started (then the tap only reveals them). */
+  const tapRevealed = useRef(false);
 
   // Create the YouTube player once; the engine drives it from then on.
   useEffect(() => {
@@ -68,17 +70,6 @@ export function VideoStage({ engine, state, isHost, reactions }: VideoStageProps
     };
   }, [engine]);
 
-  useEffect(() => {
-    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapperRef.current);
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void wrapperRef.current?.requestFullscreen().catch(() => {});
-  };
-
   const hasVideo = !!state.videoId;
   const error = apiError ?? state.error;
   const showSkeleton = hasVideo && !state.playerReady && !error;
@@ -87,20 +78,30 @@ export function VideoStage({ engine, state, isHost, reactions }: VideoStageProps
     <div
       ref={wrapperRef}
       // `dark` forces dark tokens in full screen, where the backdrop is always black.
-      className={isFullscreen ? 'dark flex h-full w-full flex-col justify-center gap-3 bg-black p-3 text-fg sm:p-6' : 'flex flex-col gap-3'}
+      className={
+        isFullscreen
+          ? `dark overflow-hidden bg-black text-fg ${immersive.pseudo ? 'fixed inset-0 z-[100]' : 'relative h-full w-full'} ${
+              immersive.controlsVisible ? '' : 'cursor-none'
+            }`
+          : 'flex flex-col gap-3'
+      }
     >
       <div
-        className={`relative w-full overflow-hidden bg-black shadow-2xl shadow-black/40 ring-1 ring-line/10 ${
-          isFullscreen ? 'min-h-0 flex-1 rounded-xl' : 'aspect-video rounded-2xl'
-        }`}
+        className={
+          isFullscreen
+            ? 'absolute inset-0 overflow-hidden bg-black'
+            : 'relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-2xl shadow-black/40 ring-1 ring-line/10'
+        }
       >
         <div ref={mountRef} className={`yt-mount absolute inset-0 ${hasVideo ? '' : 'invisible'}`} />
 
-        {/* Interaction shield: viewers can't touch the iframe; host click = play/pause. */}
+        {/* Interaction shield: viewers can't touch the iframe; host click = play/pause.
+            In full screen, a tap while the controls are hidden only brings them back. */}
         <div
           className={`absolute inset-0 ${isHost && hasVideo ? 'cursor-pointer' : ''}`}
-          onClick={isHost && hasVideo ? () => engine.togglePlay() : undefined}
-          onDoubleClick={canFullscreen && hasVideo ? toggleFullscreen : undefined}
+          onPointerDownCapture={() => (tapRevealed.current = isFullscreen && !immersive.visibleRef.current)}
+          onClick={() => !tapRevealed.current && isHost && hasVideo && engine.togglePlay()}
+          onDoubleClick={hasVideo ? immersive.toggle : undefined}
           aria-hidden
         />
 
@@ -165,13 +166,9 @@ export function VideoStage({ engine, state, isHost, reactions }: VideoStageProps
         )}
       </div>
 
-      <PlayerControls
-        engine={engine}
-        state={state}
-        isHost={isHost}
-        isFullscreen={isFullscreen}
-        onToggleFullscreen={canFullscreen ? toggleFullscreen : undefined}
-      />
+      <FullscreenBar active={isFullscreen} visible={immersive.controlsVisible}>
+        <PlayerControls engine={engine} state={state} isHost={isHost} isFullscreen={isFullscreen} onToggleFullscreen={immersive.toggle} />
+      </FullscreenBar>
     </div>
   );
 }
@@ -196,6 +193,20 @@ function EmptyStage({ isHost }: { isHost: boolean }) {
           {isHost ? 'Use the box below the player. Everyone will see it instantly.' : 'Got an idea? Suggest one in the Queue tab.'}
         </p>
       </div>
+    </div>
+  );
+}
+
+/** In full screen, the controls float over the picture and fade away while you watch. */
+export function FullscreenBar({ active, visible, children }: { active: boolean; visible: boolean; children: React.ReactNode }) {
+  if (!active) return <>{children}</>;
+  return (
+    <div
+      className={`absolute inset-x-0 bottom-0 z-30 bg-gradient-to-t from-black/90 via-black/55 to-transparent pb-[max(env(safe-area-inset-bottom),0.25rem)] pt-14 transition-opacity duration-300 ${
+        visible ? 'opacity-100' : 'pointer-events-none opacity-0'
+      }`}
+    >
+      {children}
     </div>
   );
 }

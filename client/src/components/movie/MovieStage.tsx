@@ -2,7 +2,9 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, Clapperboard, FolderOpen, Link2, Loader2, Maximize, Minimize, Play, Radio, RefreshCw, Volume2, VolumeX } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MovieReadyState, RoomSnapshot, SubtitleTrack } from '@shared/types';
+import { useImmersive } from '../../hooks/useImmersive';
 import type { FloatingReaction, RoomActions } from '../../hooks/useRoomSession';
+import { type AudioTrackInfo, type FileAudioTracks, readFileAudioTracks } from '../../lib/audioTracks';
 import { fingerprintFile, formatBytes } from '../../lib/fingerprint';
 import { formatTime } from '../../lib/format';
 import { RelayHost, RelayViewer, type RelayViewerState } from '../../lib/movieRelay';
@@ -12,10 +14,11 @@ import { parseSubtitles } from '../../lib/subtitles';
 import type { EngineState, SyncEngine } from '../../lib/syncEngine';
 import { VideoElementPlayer, type VideoSource } from '../../lib/videoElementPlayer';
 import { FloatingReactions } from '../FloatingReactions';
-import { PlayerControls } from '../PlayerControls';
+import { type AudioMenuProps, PlayerControls } from '../PlayerControls';
 import { ReactionBar } from '../ReactionBar';
 import { useToast } from '../Toasts';
-import { MOVIE_ACCEPT, localCopy, rememberFile, rememberFileForMovie } from './localFiles';
+import { FullscreenBar } from '../VideoStage';
+import { MOVIE_ACCEPT, localCopy, rememberFile, rememberFileForMovie, setAudioVariant } from './localFiles';
 import { MovieSourcePicker } from './MovieSourcePicker';
 import { ReadyCheck } from './ReadyCheck';
 import { SubtitleOverlay, SubtitlePanel, useSubtitleSettings } from './Subtitles';
@@ -35,7 +38,6 @@ interface MovieStageProps {
 /** How long to try a direct (peer-to-peer) connection before switching to the server relay. */
 const P2P_TIMEOUT_MS = 8000;
 
-const canFullscreen = typeof document !== 'undefined' && !!document.documentElement.requestFullscreen;
 const KIND_LABELS = {
   local: { icon: FolderOpen, text: "Everyone's own copy" },
   url: { icon: Link2, text: 'Streaming a link' },
@@ -55,7 +57,10 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
   const [mismatch, setMismatch] = useState<string | null>(null);
   const [noPicture, setNoPicture] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Audio languages: from the file's header (own copies) or from the player (HLS links, Safari).
+  const [fileAudio, setFileAudio] = useState<FileAudioTracks | null>(null);
+  const [audioChoice, setAudioChoice] = useState<string | null>(null);
+  const [playerAudio, setPlayerAudio] = useState<{ tracks: AudioTrackInfo[]; current: string | null } | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [streamState, setStreamState] = useState<ViewerState>('waiting');
   const [streamNeedsTap, setStreamNeedsTap] = useState(false);
@@ -94,6 +99,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
       onStateChange: (s) => engine.onPlayerStateChange(s),
       onError: (code) => engine.onPlayerError(code),
       onNoPicture: () => setNoPicture(true),
+      onAudioTracks: (tracks, current) => setPlayerAudio(tracks.length > 1 ? { tracks, current } : null),
     });
     playerRef.current = player;
     return () => {
@@ -249,17 +255,50 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
     if (remoteStream) void el.play().then(() => setStreamNeedsTap(false)).catch(() => setStreamNeedsTap(true));
   }, [remoteStream, useRelay]);
 
+  // ---------------------------------------------------------------- audio language
+
+  // Own copies: read the file's audio tracks once it's open on this device.
+  const localFile = local?.file ?? null;
+  useEffect(() => {
+    setFileAudio(null);
+    setAudioChoice(null);
+    setPlayerAudio(null);
+    if (!localFile || streamViewer) return;
+    let cancelled = false;
+    void readFileAudioTracks(localFile).then((info) => {
+      if (cancelled || !info) return;
+      setFileAudio(info);
+      setAudioChoice(info.defaultId);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [localFile, streamViewer, videoId]);
+
+  /** Switch language for this person only; playback resumes in sync at the room's position. */
+  const chooseAudio = (id: string) => {
+    if (fileAudio && videoId) {
+      setAudioVariant(videoId, fileAudio.withAudio(id));
+      setAudioChoice(id);
+      setFileVersion((n) => n + 1);
+      engine.reload();
+    } else {
+      playerRef.current?.setAudioTrack(id);
+    }
+  };
+
+  const audioMenu: AudioMenuProps | undefined = fileAudio
+    ? { tracks: fileAudio.tracks, current: audioChoice, onChange: chooseAudio }
+    : playerAudio
+      ? { ...playerAudio, onChange: chooseAudio }
+      : undefined;
+
   // ---------------------------------------------------------------- fullscreen + subtitles
 
-  useEffect(() => {
-    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapperRef.current);
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void wrapperRef.current?.requestFullscreen().catch(() => {});
-  };
+  const immersive = useImmersive(wrapperRef, streamViewer || state.isPlaying);
+  const isFullscreen = immersive.active;
+  /** Whether the controls were hidden when this tap started (then the tap only reveals them). */
+  const tapRevealed = useRef(false);
 
   const cues = useMemo(() => parseSubtitles((personalSubs ?? sharedSubtitles)?.text ?? ''), [personalSubs, sharedSubtitles]);
   // The live stream reaches viewers a fraction of a second after the host's position.
@@ -276,14 +315,23 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
     <div className="flex flex-col gap-3">
       <div
         ref={wrapperRef}
-        className={isFullscreen ? 'dark flex h-full w-full flex-col justify-center gap-3 bg-black p-3 text-fg sm:p-6' : 'relative flex flex-col gap-3'}
+        // `dark` forces dark tokens in full screen, where the backdrop is always black.
+        className={
+          isFullscreen
+            ? `dark overflow-hidden bg-black text-fg ${immersive.pseudo ? 'fixed inset-0 z-[100]' : 'relative h-full w-full'} ${
+                immersive.controlsVisible ? '' : 'cursor-none'
+              }`
+            : 'relative flex flex-col gap-3'
+        }
       >
-        <div className="relative">
+        <div className={isFullscreen ? 'absolute inset-0' : 'relative'}>
           {!isFullscreen && <Ambilight videoRef={activeVideo} active={!!movie} />}
           <div
-            className={`relative w-full overflow-hidden bg-black shadow-2xl shadow-black/60 ring-1 ring-white/10 ${
-              isFullscreen ? 'h-[calc(100vh-9rem)] rounded-xl' : 'aspect-video rounded-2xl'
-            }`}
+            className={
+              isFullscreen
+                ? 'absolute inset-0 overflow-hidden bg-black'
+                : 'relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-2xl shadow-black/60 ring-1 ring-white/10'
+            }
           >
             <video ref={videoRef} className={`absolute inset-0 h-full w-full object-contain ${streamViewer ? 'hidden' : ''}`} playsInline />
             <video
@@ -294,13 +342,25 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
               muted={streamMuted}
             />
 
-            {/* Host clicks the screen to play/pause; double-click for full screen. */}
+            {/* Host clicks the screen to play/pause; double-click for full screen. In full screen, a tap
+                while the controls are hidden only brings them back. */}
             <div
               className={`absolute inset-0 ${isHost && movie ? 'cursor-pointer' : ''}`}
-              onClick={isHost && movie && !needsFile ? () => engine.togglePlay() : undefined}
-              onDoubleClick={canFullscreen && movie ? toggleFullscreen : undefined}
+              onPointerDownCapture={() => (tapRevealed.current = isFullscreen && !immersive.visibleRef.current)}
+              onClick={() => !tapRevealed.current && isHost && movie && !needsFile && engine.togglePlay()}
+              onDoubleClick={movie ? immersive.toggle : undefined}
               aria-hidden
             />
+
+            {isFullscreen && movie && (
+              <div
+                className={`pointer-events-none absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-black/80 to-transparent px-4 pb-10 pt-[max(env(safe-area-inset-top),0.75rem)] transition-opacity duration-300 ${
+                  immersive.controlsVisible ? 'opacity-100' : 'opacity-0'
+                }`}
+              >
+                <p className="truncate text-sm font-semibold text-white sm:text-base">{movie.name}</p>
+              </div>
+            )}
 
             <SubtitleOverlay cues={cues} getTime={subtitleTime} settings={subSettings} />
 
@@ -386,20 +446,29 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
           </div>
         </div>
 
-        {streamViewer ? (
-          <StreamBar
-            engine={engine}
-            duration={video?.durationSec ?? 0}
-            hostName={host?.name ?? 'the host'}
-            relayed={useRelay}
-            muted={streamMuted}
-            onToggleMute={() => setStreamMuted((m) => !m)}
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={canFullscreen ? toggleFullscreen : undefined}
-          />
-        ) : (
-          <PlayerControls engine={engine} state={state} isHost={isHost} isFullscreen={isFullscreen} onToggleFullscreen={canFullscreen ? toggleFullscreen : undefined} />
-        )}
+        <FullscreenBar active={isFullscreen} visible={immersive.controlsVisible}>
+          {streamViewer ? (
+            <StreamBar
+              engine={engine}
+              duration={video?.durationSec ?? 0}
+              hostName={host?.name ?? 'the host'}
+              relayed={useRelay}
+              muted={streamMuted}
+              onToggleMute={() => setStreamMuted((m) => !m)}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={immersive.toggle}
+            />
+          ) : (
+            <PlayerControls
+              engine={engine}
+              state={state}
+              isHost={isHost}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={immersive.toggle}
+              audio={audioMenu}
+            />
+          )}
+        </FullscreenBar>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -604,7 +673,7 @@ function StreamBar({ engine, relayed, duration, hostName, muted, onToggleMute, i
   }, [engine]);
   const progress = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
   return (
-    <div className={`${isFullscreen ? 'rounded-xl bg-white/10 text-white' : 'glass rounded-2xl'} px-3 pb-2 pt-3 sm:px-4`}>
+    <div className={`${isFullscreen ? 'text-white' : 'glass rounded-2xl'} px-3 pb-2 pt-3 sm:px-4`}>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-line/15">
         <div className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-600" style={{ width: `${progress}%` }} />
       </div>

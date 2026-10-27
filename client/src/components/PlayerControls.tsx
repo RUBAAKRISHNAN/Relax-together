@@ -1,5 +1,7 @@
-import { Lock, Maximize, Minimize, Pause, Play, RotateCcw, RotateCw, SkipForward, Volume1, Volume2, VolumeX } from 'lucide-react';
-import { useRef, useState, type CSSProperties } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Check, Languages, Lock, Maximize, Minimize, Pause, Play, RotateCcw, RotateCw, SkipForward, Volume1, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import type { AudioTrackInfo } from '../lib/audioTracks';
 import { formatTime } from '../lib/format';
 import type { EngineState, SyncEngine } from '../lib/syncEngine';
 
@@ -11,9 +13,18 @@ interface PlayerControlsProps {
   onToggleFullscreen?: () => void;
   /** Host only: jump to the next song in the queue. */
   onSkip?: () => void;
+  /** Audio languages this person can choose between (movies with several audio tracks). */
+  audio?: AudioMenuProps;
 }
 
-export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFullscreen, onSkip }: PlayerControlsProps) {
+export interface AudioMenuProps {
+  tracks: AudioTrackInfo[];
+  current: string | null;
+  onChange: (id: string) => void;
+  busy?: boolean;
+}
+
+export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFullscreen, onSkip, audio }: PlayerControlsProps) {
   const [scrub, setScrub] = useState<number | null>(null);
   const scrubRef = useRef<number | null>(null);
 
@@ -34,7 +45,8 @@ export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFu
   const atLiveEdge = live && (state.liveBehind ?? 0) === 0;
 
   return (
-    <div className={`${isFullscreen ? 'rounded-xl bg-white/10 text-white' : 'glass rounded-2xl'} px-3 pb-2 pt-3 sm:px-4`}>
+    // In full screen the bar floats over the picture; the stage provides the fade-out gradient.
+    <div className={`${isFullscreen ? 'text-white' : 'glass rounded-2xl'} px-3 pb-2 pt-3 sm:px-4`}>
       {live ? (
         // Live streams have no meaningful duration, so the bar just shows "live" vs "behind".
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-line/15" aria-hidden>
@@ -119,6 +131,7 @@ export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFu
         )}
 
         <div className="ml-auto flex items-center gap-0.5">
+          {audio && audio.tracks.length > 1 && <AudioMenu {...audio} />}
           <button type="button" className="icon-btn" onClick={() => engine.toggleMute()} disabled={!state.playerReady} aria-label={volume === 0 ? 'Unmute' : 'Mute'}>
             <VolumeIcon className="h-5 w-5" aria-hidden />
           </button>
@@ -178,5 +191,71 @@ function LiveBadge({ atEdge, behind, onGoLive }: LiveBadgeProps) {
       <span className="tabular-nums">−{formatTime(behind ?? 0)}</span>
       <span className="hidden sm:inline">· Go live</span>
     </button>
+  );
+}
+
+/** Picks the audio language (per person: everyone can listen in their own language). */
+function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', esc);
+    };
+  }, [open]);
+  const currentLabel = tracks.find((t) => t.id === current)?.label ?? 'Audio';
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        className={`icon-btn ${open ? 'bg-line/10' : ''}`}
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Audio language: ${currentLabel}`}
+        title={`Audio: ${currentLabel}`}
+      >
+        <Languages className={`h-5 w-5 ${busy ? 'animate-pulse' : ''}`} aria-hidden />
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.ul
+            role="menu"
+            aria-label="Audio language"
+            initial={{ opacity: 0, y: 6, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.97 }}
+            transition={{ duration: 0.12 }}
+            className="absolute bottom-full right-0 z-40 mb-2 max-h-72 w-56 overflow-y-auto rounded-xl border border-white/10 bg-zinc-900/95 p-1 text-sm text-white shadow-2xl backdrop-blur"
+          >
+            <li className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-white/60">Audio</li>
+            {tracks.map((t) => (
+              <li key={t.id} role="none">
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={t.id === current}
+                  onClick={() => {
+                    setOpen(false);
+                    if (t.id !== current) onChange(t.id);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none"
+                >
+                  <Check className={`h-4 w-4 shrink-0 ${t.id === current ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
+                  <span className="truncate">{t.label}</span>
+                </button>
+              </li>
+            ))}
+          </motion.ul>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

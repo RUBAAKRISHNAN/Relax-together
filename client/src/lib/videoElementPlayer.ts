@@ -1,3 +1,4 @@
+import { type AudioTrackInfo, makeLabel } from './audioTracks';
 import type { MediaPlayer } from './mediaPlayer';
 import { PlayerState, VIDEO_FILE_ERROR } from './youtubeApi';
 
@@ -12,9 +13,21 @@ interface VideoEvents {
   onError: (code: number) => void;
   /** The file plays but its picture can't be decoded (typically HEVC/x265 on a browser without support). */
   onNoPicture: () => void;
+  /** Audio languages the player itself can switch (HLS streams, or Safari's native audioTracks). */
+  onAudioTracks?: (tracks: AudioTrackInfo[], current: string | null) => void;
 }
 
-type HlsInstance = { loadSource(src: string): void; attachMedia(el: HTMLMediaElement): void; destroy(): void };
+type HlsInstance = {
+  loadSource(src: string): void;
+  attachMedia(el: HTMLMediaElement): void;
+  destroy(): void;
+  on(event: string, cb: () => void): void;
+  audioTracks: { name?: string; lang?: string }[];
+  audioTrack: number;
+};
+
+/** Safari's HTMLMediaElement.audioTracks (missing from TypeScript's DOM typings). */
+type NativeAudioTracks = ArrayLike<{ id: string; label: string; language: string; enabled: boolean }> & EventTarget;
 
 /**
  * Drives a <video> element through the same interface as the YouTube player, so movie rooms reuse
@@ -55,7 +68,20 @@ export class VideoElementPlayer implements MediaPlayer {
       if (!video.paused) events.onStateChange(PlayerState.PLAYING);
     });
     on('ended', () => events.onStateChange(PlayerState.ENDED));
-    on('loadedmetadata', () => video.duration > 0 && video.videoWidth === 0 && events.onNoPicture());
+    on('loadedmetadata', () => {
+      if (video.duration > 0 && video.videoWidth === 0) events.onNoPicture();
+      this.reportAudioTracks();
+    });
+    const native = this.nativeAudioTracks();
+    if (native) {
+      const report = () => this.reportAudioTracks();
+      native.addEventListener('addtrack', report);
+      native.addEventListener('change', report);
+      this.cleanup.push(() => {
+        native.removeEventListener('addtrack', report);
+        native.removeEventListener('change', report);
+      });
+    }
     on('error', () => video.getAttribute('src') && events.onError(VIDEO_FILE_ERROR));
   }
 
@@ -68,6 +94,8 @@ export class VideoElementPlayer implements MediaPlayer {
       if (!Hls.isSupported()) return this.events.onError(VIDEO_FILE_ERROR);
       const hls = new Hls({ startPosition: startSeconds }) as unknown as HlsInstance;
       this.hls = hls;
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => this.reportAudioTracks());
+      hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => this.reportAudioTracks());
       hls.loadSource(source.src);
       hls.attachMedia(v);
     } else {
@@ -93,6 +121,44 @@ export class VideoElementPlayer implements MediaPlayer {
     }
     this.pending = null;
     void this.attach(source, options.startSeconds ?? 0, autoplay);
+  }
+
+  private nativeAudioTracks(): NativeAudioTracks | null {
+    return (this.video as unknown as { audioTracks?: NativeAudioTracks }).audioTracks ?? null;
+  }
+
+  /** Audio tracks this player can switch itself: hls.js tracks, or the browser's native list. */
+  getAudioTracks(): { tracks: AudioTrackInfo[]; current: string | null } {
+    if (this.hls?.audioTracks?.length) {
+      return {
+        tracks: this.hls.audioTracks.map((t, i) => ({ id: String(i), label: makeLabel(i, t.name, t.lang) })),
+        current: String(this.hls.audioTrack),
+      };
+    }
+    const native = this.nativeAudioTracks();
+    if (native && native.length) {
+      const list = Array.from(native);
+      return {
+        tracks: list.map((t, i) => ({ id: t.id || String(i), label: makeLabel(i, t.label, t.language) })),
+        current: list.find((t) => t.enabled)?.id ?? null,
+      };
+    }
+    return { tracks: [], current: null };
+  }
+
+  setAudioTrack(id: string) {
+    if (this.hls?.audioTracks?.length) {
+      this.hls.audioTrack = Number(id);
+      return;
+    }
+    const native = this.nativeAudioTracks();
+    if (native) Array.from(native).forEach((t, i) => (t.enabled = (t.id || String(i)) === id));
+    this.reportAudioTracks();
+  }
+
+  private reportAudioTracks() {
+    const { tracks, current } = this.getAudioTracks();
+    this.events.onAudioTracks?.(tracks, current);
   }
 
   /** True when the last load had nothing to play on this device. */
