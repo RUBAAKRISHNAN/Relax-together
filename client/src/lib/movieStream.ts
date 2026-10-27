@@ -54,6 +54,7 @@ interface Peer {
 export class StreamHost {
   private peers = new Map<UserId, Peer>();
   private stream: MediaStream | null = null;
+  /** Viewers who asked for the stream ("hello") and are still in the room. */
   private viewers = new Set<UserId>();
 
   constructor(
@@ -63,19 +64,24 @@ export class StreamHost {
     socket.on('rtc:signal', this.onSignal);
   }
 
-  /** The captured movie (video.captureStream()). A new stream reconnects everyone. */
+  /** The captured movie (video.captureStream()). A new stream reconnects everyone who asked. */
   setStream(stream: MediaStream | null) {
     if (stream === this.stream) return;
     this.stream = stream;
     for (const id of this.viewers) void this.connect(id);
   }
 
-  /** Who should be receiving the stream. Only viewers without a connection get a new one. */
+  /**
+   * Who is still in the room. Connections are only ever started by a viewer's "hello" (exactly
+   * one offer per request), so this just drops viewers who left.
+   */
   setViewers(ids: UserId[]) {
-    const next = new Set(ids);
-    for (const id of this.viewers) if (!next.has(id)) this.close(id);
-    for (const id of next) if (!this.peers.has(id)) void this.connect(id);
-    this.viewers = next;
+    const present = new Set(ids);
+    for (const id of [...this.viewers]) {
+      if (present.has(id)) continue;
+      this.viewers.delete(id);
+      this.close(id);
+    }
   }
 
   private send(to: UserId, signal: RtcSignal) {
