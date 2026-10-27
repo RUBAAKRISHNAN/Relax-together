@@ -17,12 +17,13 @@ const SLICE_MS = 250;
 /** A new viewer asks for a fresh recording; restarts are batched so a crowd joining is one restart. */
 const RESTART_DEBOUNCE_MS = 400;
 /**
- * Viewer jitter buffer: slices arrive in bursts over the network, so playback starts only with
- * this much buffered, and catches up to this far behind the newest data when it falls behind.
+ * Viewer jitter buffer: slices arrive in bursts over the network (host → server → viewer can span
+ * continents), so playback starts only with this much buffered, and catches up to this far behind
+ * the newest data when it falls behind. A few seconds of delay is invisible in a movie; stutter isn't.
  */
-const START_BUFFER_S = 1.0;
-const TARGET_DELAY_S = 1.5;
-const MAX_DELAY_S = 4;
+const START_BUFFER_S = 2;
+const TARGET_DELAY_S = 3;
+const MAX_DELAY_S = 7;
 
 const MIME_CANDIDATES = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
 
