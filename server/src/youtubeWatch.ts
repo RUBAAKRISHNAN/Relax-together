@@ -87,16 +87,31 @@ export function parseWatchPage(html: string, videoId: string): WatchInfo {
   return { isLive, suggestions };
 }
 
+/** One retry with a longer timeout: YouTube occasionally stalls (or briefly refuses) a request. */
 async function load(videoId: string): Promise<WatchInfo | null> {
+  return (await attempt(videoId, 6000)) ?? (await attempt(videoId, 10_000));
+}
+
+async function attempt(videoId: string, timeoutMs: number): Promise<WatchInfo | null> {
   try {
     const res = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en&gl=US`, {
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: BROWSER_HEADERS,
     });
-    if (!res.ok) return null;
-    return parseWatchPage(await res.text(), videoId);
+    if (!res.ok) {
+      console.warn(`[youtube] watch page for ${videoId}: HTTP ${res.status}`);
+      return null;
+    }
+    const html = await res.text();
+    const info = parseWatchPage(html, videoId);
+    // A consent or "confirm you're not a bot" page parses to nothing; treat it as a failure.
+    if (!info.suggestions.length && !html.includes('ytInitialData')) {
+      console.warn(`[youtube] watch page for ${videoId}: no page data (blocked or consent page)`);
+      return null;
+    }
+    return info;
   } catch (err) {
-    console.warn(`[youtube] watch page for ${videoId} failed:`, (err as Error).message);
+    console.warn(`[youtube] watch page for ${videoId} failed (${timeoutMs} ms):`, (err as Error).message);
     return null;
   }
 }

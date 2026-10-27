@@ -12,6 +12,7 @@ import type {
   UploadResponse,
 } from '@shared/types';
 import { CLIENT_URLS, IS_PROD, PORT, isAllowedOrigin } from './config';
+import { fetchVideoMeta } from './oembed';
 import { IpRateLimiter } from './rateLimiter';
 import { RoomStore, positionAt } from './roomStore';
 import { registerSocketHandlers } from './socketHandlers';
@@ -83,12 +84,22 @@ app.get('/api/videos/:id/suggestions', async (req, res) => {
     return;
   }
   const info = await fetchWatchInfo(id);
-  if (!info) {
+  let suggestions = info?.suggestions ?? [];
+  if (!suggestions.length) {
+    // Cloud servers sometimes get YouTube's watch page refused while search still works, so fall
+    // back to "more like this" from a search on the video's title and channel.
+    const meta = await fetchVideoMeta(id);
+    if (meta.ok) {
+      const query = `${meta.meta.author} ${meta.meta.title}`.replace(/\(.*?\)|\[.*?\]|official|video|audio|lyrics?/gi, ' ').trim();
+      suggestions = (await searchYouTube(query)).filter((s) => s.videoId !== id && !s.isLive);
+    }
+  }
+  if (!suggestions.length) {
     res.status(502).json({ error: "Couldn't reach YouTube for suggestions." });
     return;
   }
   res.set('Cache-Control', 'public, max-age=120');
-  const body: SuggestionsResponse = { videoId: id, isLive: info.isLive, suggestions: info.suggestions };
+  const body: SuggestionsResponse = { videoId: id, isLive: info?.isLive ?? false, suggestions };
   res.json(body);
 });
 
