@@ -40,11 +40,15 @@ export class ServerClock {
 
   sync(): Promise<void> {
     this.running ??= (async () => {
-      const samples: Sample[] = [];
+      // Pings go out 40 ms apart without waiting for each reply, so a sync costs about one round
+      // trip instead of five (that delay sits in front of every room join), while still sampling
+      // a spread of moments. The lowest-RTT sample wins, as before.
+      const pings: Promise<Sample | null>[] = [];
       for (let i = 0; i < SYNC.CLOCK_SAMPLES && this.socket.connected; i++) {
-        const s = await this.ping();
-        if (s) samples.push(s);
+        if (i > 0) await new Promise((r) => setTimeout(r, 40));
+        pings.push(this.ping());
       }
+      const samples = (await Promise.all(pings)).filter((s): s is Sample => s !== null);
       const best = samples.sort((a, b) => a.rtt - b.rtt)[0];
       if (best) {
         this.offset = best.offset;

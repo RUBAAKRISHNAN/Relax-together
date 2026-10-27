@@ -62,6 +62,7 @@ export class StreamHost {
     private onPeersChange: (states: Record<UserId, RTCPeerConnectionState>) => void,
   ) {
     socket.on('rtc:signal', this.onSignal);
+    void iceServers(); // warm the ICE config so the first viewer isn't kept waiting for it
   }
 
   /** The captured movie (video.captureStream()). A new stream reconnects everyone who asked. */
