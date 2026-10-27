@@ -24,6 +24,9 @@ const RESTART_DEBOUNCE_MS = 400;
 const START_BUFFER_S = 2;
 const TARGET_DELAY_S = 3;
 const MAX_DELAY_S = 7;
+/** Below / above this much buffered, play slightly slower / faster (pitch preserved, inaudible). */
+const LOW_BUFFER_S = 1.5;
+const HIGH_BUFFER_S = 4;
 
 const MIME_CANDIDATES = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
 
@@ -115,6 +118,9 @@ export class RelayViewer {
   private objectUrl: string | null = null;
   private stopped = false;
   private state: RelayViewerState = 'waiting';
+  /** Paused on purpose until enough is buffered (at start, or after running dry). */
+  private rebuffering = true;
+  private controlTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private socket: AppSocket,
@@ -130,7 +136,46 @@ export class RelayViewer {
     }
     this.socket.on('relay:chunk', this.onChunk);
     this.socket.on('connect', this.subscribe); // re-subscribe after a reconnect
+    // The relay decides when to play (after buffering), not the browser.
+    this.video.autoplay = false;
+    this.video.addEventListener('waiting', this.onRanDry);
+    this.controlTimer = setInterval(() => this.control(), 500);
     this.subscribe();
+  }
+
+  /** Buffer ran dry: pause and rebuffer properly instead of stuttering on every slice. */
+  private onRanDry = () => {
+    if (this.ahead() < 0.5) {
+      this.rebuffering = true;
+      this.video.pause();
+    }
+  };
+
+  private ahead(): number {
+    const r = this.video.buffered;
+    return r.length ? r.end(r.length - 1) - this.video.currentTime : 0;
+  }
+
+  /** Keeps the buffer near its target: resume after rebuffering, and nudge speed gently. */
+  private control() {
+    const v = this.video;
+    const r = v.buffered;
+    if (!r.length) return;
+    const end = r.end(r.length - 1);
+    // Fell far behind (e.g. after a long stall): skip ahead rather than lag further.
+    if (end - v.currentTime > MAX_DELAY_S || v.currentTime < r.start(0)) v.currentTime = Math.max(r.start(0), end - TARGET_DELAY_S);
+    const ahead = this.ahead();
+    if (this.rebuffering) {
+      if (ahead < START_BUFFER_S) return;
+      this.rebuffering = false;
+      void v.play().then(
+        () => this.setState('playing'),
+        () => this.onNeedsTap(),
+      );
+      return;
+    }
+    v.playbackRate = ahead < LOW_BUFFER_S ? 0.96 : ahead > HIGH_BUFFER_S ? 1.04 : 1;
+    if (!v.paused) this.setState('playing');
   }
 
   private subscribe = () => this.socket.emit('relay:subscribe');
@@ -159,6 +204,7 @@ export class RelayViewer {
     const ms = new MediaSource();
     this.mediaSource = ms;
     this.queue = [];
+    this.rebuffering = true;
     this.objectUrl = URL.createObjectURL(ms);
     this.video.srcObject = null;
     this.video.src = this.objectUrl;
@@ -166,8 +212,9 @@ export class RelayViewer {
       'sourceopen',
       () => {
         if (this.mediaSource !== ms) return;
+        // Default "segments" mode keeps the recording's own continuous timestamps; "sequence"
+        // re-times each appended piece and leaves tiny gaps between interleaved audio/video slices.
         const sb = ms.addSourceBuffer(mime);
-        sb.mode = 'sequence';
         sb.addEventListener('updateend', () => this.afterAppend());
         this.buffer = sb;
         this.pump();
@@ -188,25 +235,7 @@ export class RelayViewer {
   }
 
   private afterAppend() {
-    const v = this.video;
-    const ranges = v.buffered;
-    if (ranges.length) {
-      const end = ranges.end(ranges.length - 1);
-      // Stay near the live edge: after a long stall, skip ahead rather than fall further behind.
-      if (end - v.currentTime > MAX_DELAY_S || v.currentTime < ranges.start(0)) {
-        v.currentTime = Math.max(ranges.start(0), end - TARGET_DELAY_S);
-      }
-      if (v.paused && end - v.currentTime < START_BUFFER_S) {
-        // Not enough buffered yet to play smoothly.
-      } else if (v.paused) {
-        void v.play().then(
-          () => this.setState('playing'),
-          () => this.onNeedsTap(),
-        );
-      } else {
-        this.setState('playing');
-      }
-    }
+    this.control();
     this.trim(false);
     this.pump();
   }
@@ -242,6 +271,10 @@ export class RelayViewer {
 
   stop() {
     this.stopped = true;
+    if (this.controlTimer) clearInterval(this.controlTimer);
+    this.video.removeEventListener('waiting', this.onRanDry);
+    this.video.playbackRate = 1;
+    this.video.autoplay = true;
     this.socket.off('relay:chunk', this.onChunk);
     this.socket.off('connect', this.subscribe);
     this.socket.emit('relay:unsubscribe');
