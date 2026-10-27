@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { Server, Socket } from 'socket.io';
-import { CHAT_HISTORY_LIMIT, MAX_MEMBERS, MAX_QUEUE_LENGTH, MEMBER_GRACE_MS, MOVIE_SOURCE_PREFIX } from '@shared/constants';
+import {
+  CHAT_HISTORY_LIMIT,
+  MAX_MEMBERS,
+  MAX_QUEUE_LENGTH,
+  MEMBER_GRACE_MS,
+  MOVIE_SOURCE_PREFIX,
+  RELAY_PIECE_BYTES,
+} from '@shared/constants';
 import type {
   AckResponse,
   SubtitleInfo,
@@ -150,11 +157,22 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
     return 'queued';
   }
 
+  /** Tells the host how many viewers need the server relay (and whether to start a fresh recording). */
+  function relayDemand(room: Room, restart: boolean) {
+    const host = room.hostId ? room.members.get(room.hostId) : undefined;
+    if (host?.socketId) io.to(host.socketId).emit('relay:demand', { viewers: room.relayViewers.size, restart });
+  }
+
+  function dropRelayViewer(room: Room, userId: UserId) {
+    if (room.relayViewers.delete(userId)) relayDemand(room, false);
+  }
+
   function removeMember(room: Room, userId: UserId) {
     const member = room.members.get(userId);
     if (!member || member.online) return;
     if (member.removalTimer) clearTimeout(member.removalTimer);
     room.members.delete(userId);
+    dropRelayViewer(room, userId);
     io.to(room.id).emit('room:notice', { kind: 'left', text: `${member.name} left` });
 
     if (room.hostId === userId) {
@@ -184,6 +202,9 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
     room.playback = { videoId: room.video.videoId, isPlaying: false, currentTime: 0, lastUpdatedAt: Date.now(), playbackRate: 1 };
     room.movieReady = new Map([[by.id, 'ready']]);
     room.subtitles = null;
+    // Relay viewers re-subscribe for the new movie if they still need it.
+    room.relayViewers.clear();
+    relayDemand(room, false);
     io.to(room.id).emit('movie:subtitles', null);
     // State first: clients need the movie's details (source, fingerprint) to act on the load.
     broadcastState(room);
@@ -256,6 +277,7 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       socket.leave(room.id);
       member.socketId = null;
       member.online = false;
+      dropRelayViewer(room, member.id);
       if (mode === 'leave') {
         removeMember(room, member.id);
       } else {
@@ -493,6 +515,48 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       io.to(target.socketId).emit('rtc:signal', { from: c.member.id, signal: parsed.data.signal });
     });
 
+    /**
+     * Server relay for "stream from my device", used when peer-to-peer can't connect (carrier-grade
+     * NAT on mobile/fibre networks). The host records its stream (WebM) and sends small pieces;
+     * the server forwards them to subscribed viewers, who play them through Media Source Extensions.
+     */
+    on('relay:subscribe', () => {
+      const c = current();
+      if (!c || c.room.video?.movie?.kind !== 'stream' || c.room.hostId === c.member.id) return;
+      c.room.relayViewers.add(c.member.id);
+      // A new joiner needs a fresh recording (header + keyframe) to start from.
+      relayDemand(c.room, true);
+    });
+
+    on('relay:unsubscribe', () => {
+      const c = current();
+      if (c) dropRelayViewer(c.room, c.member.id);
+    });
+
+    // Byte budget for relay uploads: a generous movie bitrate, with room for keyframe bursts.
+    const relayBudget = { tokens: 4 * 1024 * 1024, last: Date.now() };
+    on('relay:chunk', (raw) => {
+      const c = currentHost();
+      if (!c || !c.room.relayViewers.size || typeof raw !== 'object' || raw === null) return;
+      const { init, mime, data } = raw as { init?: unknown; mime?: unknown; data?: unknown };
+      const bytes = Buffer.isBuffer(data) ? data : data instanceof ArrayBuffer ? Buffer.from(data) : null;
+      if (!bytes || bytes.length === 0 || bytes.length > RELAY_PIECE_BYTES) return;
+      const now = Date.now();
+      relayBudget.tokens = Math.min(4 * 1024 * 1024, relayBudget.tokens + ((now - relayBudget.last) / 1000) * 1024 * 1024);
+      relayBudget.last = now;
+      if (relayBudget.tokens < bytes.length) return;
+      relayBudget.tokens -= bytes.length;
+      const targets = [...c.room.relayViewers]
+        .map((id) => c.room.members.get(id)?.socketId)
+        .filter((id): id is string => !!id);
+      if (!targets.length) return;
+      io.to(targets).emit('relay:chunk', {
+        init: init === true,
+        mime: typeof mime === 'string' && mime.length < 100 ? mime : undefined,
+        data: bytes as unknown as ArrayBuffer,
+      });
+    });
+
     on('room:mood', (raw, ack) => {
       const c = currentHost();
       if (!c) return reply(ack, fail('Only the host can set the mood.', 'FORBIDDEN'));
@@ -519,6 +583,8 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       const target = c.room.members.get(parsed.data.userId);
       if (!target || !target.online || target.id === c.member.id) return reply(ack, fail('That person is not available.'));
       c.room.hostId = target.id;
+      // Relayed movie streams come from the host's device; the new host starts fresh.
+      c.room.relayViewers.clear();
       broadcastState(c.room);
       io.to(c.room.id).emit('room:notice', { kind: 'host', text: `${c.member.name} made ${target.name} the host` });
       reply(ack, ok(null));

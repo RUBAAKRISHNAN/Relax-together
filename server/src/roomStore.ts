@@ -29,6 +29,8 @@ export interface Room {
   /** Movie rooms: readiness per member for the current movie, and the shared subtitles. */
   movieReady: Map<UserId, MovieReadyState>;
   subtitles: (SubtitleTrack & { version: number }) | null;
+  /** Movie rooms: viewers receiving the host's stream through the server (peer-to-peer failed). */
+  relayViewers: Set<UserId>;
   /** Insertion order == join order, which makes "oldest member" lookups trivial. */
   members: Map<UserId, ServerMember>;
   playback: PlaybackState;
@@ -76,6 +78,7 @@ export class RoomStore {
       mood: 'calm',
       movieReady: new Map(),
       subtitles: null,
+      relayViewers: new Set(),
       members: new Map(),
       playback: { videoId: null, isPlaying: false, currentTime: 0, lastUpdatedAt: now, playbackRate: 1 },
       video: null,

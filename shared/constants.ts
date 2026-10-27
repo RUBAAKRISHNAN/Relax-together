@@ -31,7 +31,13 @@ export const isFileSource = (id: string | null | undefined): id is string => !!i
 /** Movies use this prefix in place of a YouTube video id. */
 export const MOVIE_SOURCE_PREFIX = 'movie:';
 export const isMovieSource = (id: string | null | undefined): id is string => !!id && id.startsWith(MOVIE_SOURCE_PREFIX);
-/** Shared subtitle files (SRT/VTT) are sent over the socket, so keep them modest. */
+/**
+ * Server-relayed movie stream (fallback when peer-to-peer can't connect): the host sends its
+ * encoded stream in pieces of at most this size. Hosting proxies drop WebSocket messages of a few
+ * hundred KB, so pieces stay well below that.
+ */
+export const RELAY_PIECE_BYTES = 96 * 1024;
+/** Shared subtitle files (SRT/VTT) are capped at this many characters. */
 export const SUBTITLE_MAX_CHARS = 800_000;
 
 export const REACTION_EMOJIS = ['❤️', '😂', '🔥', '😮', '👏'] as const;

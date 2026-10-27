@@ -64,6 +64,14 @@ export interface SubtitleInfo {
   version: number;
 }
 
+export interface RelayChunk {
+  /** First piece of a new recording: viewers reset their player and start from here. */
+  init: boolean;
+  /** Container/codec string for MediaSource, sent with init pieces. */
+  mime?: string;
+  data: ArrayBuffer;
+}
+
 /** Same shape as the DOM's RTCIceCandidateInit (redeclared because the server has no DOM types). */
 export interface IceCandidate {
   candidate?: string;
@@ -221,6 +229,11 @@ export interface ClientToServerEvents {
   /** Sharing goes over HTTP (POST /api/rooms/:id/subtitles); this only removes them. */
   'movie:clearSubtitles': (ack: Ack) => void;
   'rtc:signal': (p: { to: UserId; signal: RtcSignal }) => void;
+  /** Viewer: peer-to-peer failed, send me the stream through the server instead. */
+  'relay:subscribe': () => void;
+  'relay:unsubscribe': () => void;
+  /** Host: a piece of the encoded stream (WebM). `init` marks the start of a fresh recording. */
+  'relay:chunk': (p: RelayChunk) => void;
   /** Short-lived permission for HTTP uploads into the room (songs, subtitles). */
   'room:uploadToken': (ack: Ack<{ token: string; expiresAt: number }>) => void;
   'chat:send': (p: { text: string }, ack: Ack) => void;
@@ -233,6 +246,9 @@ export interface ServerToClientEvents {
   'room:closed': (p: { reason: string }) => void;
   'movie:subtitles': (info: SubtitleInfo | null) => void;
   'rtc:signal': (p: { from: UserId; signal: RtcSignal }) => void;
+  'relay:chunk': (p: RelayChunk) => void;
+  /** To the host: how many viewers need the relay; `restart` asks for a fresh recording (new joiner). */
+  'relay:demand': (p: { viewers: number; restart: boolean }) => void;
   'player:sync': (ev: SyncEvent) => void;
   'chat:message': (msg: ChatMessage) => void;
   reaction: (ev: ReactionEvent) => void;

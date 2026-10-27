@@ -5,6 +5,7 @@ import type { MovieReadyState, RoomSnapshot, SubtitleTrack } from '@shared/types
 import type { FloatingReaction, RoomActions } from '../../hooks/useRoomSession';
 import { fingerprintFile, formatBytes } from '../../lib/fingerprint';
 import { formatTime } from '../../lib/format';
+import { RelayHost, RelayViewer, type RelayViewerState } from '../../lib/movieRelay';
 import { StreamHost, StreamViewer, type ViewerState, captureVideo } from '../../lib/movieStream';
 import type { AppSocket } from '../../lib/socket';
 import { parseSubtitles } from '../../lib/subtitles';
@@ -31,6 +32,9 @@ interface MovieStageProps {
   sharedSubtitles: SubtitleTrack | null;
 }
 
+/** How long to try a direct (peer-to-peer) connection before switching to the server relay. */
+const P2P_TIMEOUT_MS = 8000;
+
 const canFullscreen = typeof document !== 'undefined' && !!document.documentElement.requestFullscreen;
 const KIND_LABELS = {
   local: { icon: FolderOpen, text: "Everyone's own copy" },
@@ -55,6 +59,10 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [streamState, setStreamState] = useState<ViewerState>('waiting');
   const [streamNeedsTap, setStreamNeedsTap] = useState(false);
+  // Peer-to-peer first; if it can't connect (carrier-grade NAT), the stream comes via the server.
+  const [useRelay, setUseRelay] = useState(false);
+  const [relayState, setRelayState] = useState<RelayViewerState>('waiting');
+  const [streamAttempt, setStreamAttempt] = useState(0);
   const [streamMuted, setStreamMuted] = useState(false);
   const [peerStates, setPeerStates] = useState<Record<string, RTCPeerConnectionState>>({});
   const [personalSubs, setPersonalSubs] = useState<SubtitleTrack | null>(null);
@@ -139,7 +147,10 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
   useEffect(() => {
     if (!videoId || !kind) return;
     let ready: MovieReadyState;
-    if (kind === 'stream' && !isHost) ready = streamState === 'connected' ? 'ready' : streamState === 'failed' ? 'error' : 'missing';
+    if (kind === 'stream' && !isHost) {
+      if (streamState === 'connected' || relayState === 'playing') ready = 'ready';
+      else ready = relayState === 'unsupported' ? 'error' : 'missing';
+    }
     else if (state.error) ready = 'error';
     else if (kind === 'url') ready = 'ready';
     else ready = !local ? 'missing' : mismatch ? 'mismatch' : 'ready';
@@ -147,7 +158,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
     if (reported.current === key) return;
     reported.current = key;
     actions.reportMovieReady(videoId, ready);
-  }, [videoId, kind, isHost, streamState, state.error, local, mismatch, actions]);
+  }, [videoId, kind, isHost, streamState, relayState, state.error, local, mismatch, actions]);
 
   // ---------------------------------------------------------------- streaming (host)
 
@@ -157,6 +168,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
     if (!hostStreaming) return;
     const el = videoRef.current!;
     const host = new StreamHost(socket, setPeerStates);
+    const relay = new RelayHost(socket);
     streamHostRef.current = host;
     let captured: MediaStream | null = null;
     const capture = () => {
@@ -168,14 +180,20 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
       if (stream === captured) return;
       captured = stream;
       // Tracks are swapped when the picture/sound restarts; reconnect viewers with the new ones.
-      stream.onaddtrack = () => host.setStream(new MediaStream(stream.getTracks()));
+      stream.onaddtrack = () => {
+        const tracks = new MediaStream(stream.getTracks());
+        host.setStream(tracks);
+        relay.setStream(tracks);
+      };
       host.setStream(stream);
+      relay.setStream(stream);
     };
     if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) capture();
     el.addEventListener('loadeddata', capture);
     return () => {
       el.removeEventListener('loadeddata', capture);
       host.stop();
+      relay.stop();
       streamHostRef.current = null;
       setPeerStates({});
     };
@@ -188,26 +206,48 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
 
   // ---------------------------------------------------------------- streaming (viewer)
 
+  // Each movie, host or manual retry starts over with peer-to-peer.
+  useEffect(() => {
+    setUseRelay(false);
+    setRelayState('waiting');
+  }, [videoId, snapshot.hostId, streamAttempt]);
+
   const streamViewerRef = useRef<StreamViewer | null>(null);
   useEffect(() => {
-    if (!streamViewer || !snapshot.hostId) return;
-    const viewer = new StreamViewer(socket, setRemoteStream, setStreamState);
+    if (!streamViewer || !snapshot.hostId || useRelay) return;
+    let connected = false;
+    const viewer = new StreamViewer(socket, setRemoteStream, (s) => {
+      setStreamState(s);
+      if (s === 'connected') connected = true;
+      // Direct connection impossible on this network: go through the server instead.
+      if (s === 'failed' && !connected) setUseRelay(true);
+    });
     streamViewerRef.current = viewer;
     viewer.connect(snapshot.hostId);
+    const fallback = setTimeout(() => !connected && setUseRelay(true), P2P_TIMEOUT_MS);
     return () => {
+      clearTimeout(fallback);
       viewer.stop();
       streamViewerRef.current = null;
       setRemoteStream(null);
       setStreamState('waiting');
     };
-  }, [streamViewer, snapshot.hostId, socket, videoId]);
+  }, [streamViewer, snapshot.hostId, socket, videoId, useRelay, streamAttempt]);
 
   useEffect(() => {
     const el = streamVideoRef.current;
-    if (!el) return;
+    if (!streamViewer || !useRelay || !el) return;
+    const relay = new RelayViewer(socket, el, setRelayState, () => setStreamNeedsTap(true));
+    relay.start();
+    return () => relay.stop();
+  }, [streamViewer, useRelay, socket, videoId]);
+
+  useEffect(() => {
+    const el = streamVideoRef.current;
+    if (!el || useRelay) return;
     el.srcObject = remoteStream;
     if (remoteStream) void el.play().then(() => setStreamNeedsTap(false)).catch(() => setStreamNeedsTap(true));
-  }, [remoteStream]);
+  }, [remoteStream, useRelay]);
 
   // ---------------------------------------------------------------- fullscreen + subtitles
 
@@ -277,22 +317,27 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
               />
             )}
 
-            {streamViewer && streamState !== 'connected' && (
+            {streamViewer && streamState !== 'connected' && relayState !== 'playing' && (
               <div className="absolute inset-0 z-10 grid place-items-center bg-black/80 p-6 text-center text-white">
-                {streamState === 'failed' ? (
+                {relayState === 'unsupported' ? (
                   <div className="flex max-w-sm flex-col items-center gap-3">
                     <AlertTriangle className="h-8 w-8 text-amber-400" aria-hidden />
-                    <p className="font-semibold">Couldn't connect to {host?.name ?? 'the host'}'s stream</p>
-                    <p className="text-sm text-white/70">Some networks block peer-to-peer video. Retry, or ask the host to use a link or “everyone has the file”.</p>
-                    <button type="button" className="btn-ghost px-4 py-2 text-sm text-white" onClick={() => snapshot.hostId && streamViewerRef.current?.connect(snapshot.hostId)}>
+                    <p className="font-semibold">This browser can't play the relayed stream</p>
+                    <p className="text-sm text-white/70">Open the room in Chrome, Edge or Firefox, or ask the host to use a link or “everyone has the file”.</p>
+                  </div>
+                ) : (
+                  <div className="flex max-w-sm flex-col items-center gap-3">
+                    <p className="flex items-center gap-2 font-semibold">
+                      <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+                      {useRelay
+                        ? `Streaming ${host?.name ?? 'the host'}'s movie through the server…`
+                        : `${streamState === 'retrying' ? 'Reconnecting' : 'Connecting'} to ${host?.name ?? 'the host'}'s stream…`}
+                    </p>
+                    {useRelay && <p className="text-sm text-white/70">A direct connection isn't possible on this network, so the movie is coming via our server.</p>}
+                    <button type="button" className="btn-ghost px-4 py-2 text-sm text-white" onClick={() => setStreamAttempt((n) => n + 1)}>
                       <RefreshCw className="h-4 w-4" aria-hidden /> Retry
                     </button>
                   </div>
-                ) : (
-                  <p className="flex items-center gap-2 font-semibold">
-                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
-                    {streamState === 'retrying' ? 'Reconnecting' : 'Connecting'} to {host?.name ?? 'the host'}'s stream…
-                  </p>
                 )}
               </div>
             )}
@@ -346,6 +391,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
             engine={engine}
             duration={video?.durationSec ?? 0}
             hostName={host?.name ?? 'the host'}
+            relayed={useRelay}
             muted={streamMuted}
             onToggleMute={() => setStreamMuted((m) => !m)}
             isFullscreen={isFullscreen}
@@ -539,6 +585,8 @@ function Ambilight({ videoRef, active }: { videoRef: React.RefObject<HTMLVideoEl
 
 interface StreamBarProps {
   engine: SyncEngine;
+  /** Coming through the server relay rather than peer-to-peer. */
+  relayed: boolean;
   duration: number;
   hostName: string;
   muted: boolean;
@@ -548,7 +596,7 @@ interface StreamBarProps {
 }
 
 /** Controls for people watching the host's live stream: there's nothing to seek, just watch. */
-function StreamBar({ engine, duration, hostName, muted, onToggleMute, isFullscreen, onToggleFullscreen }: StreamBarProps) {
+function StreamBar({ engine, relayed, duration, hostName, muted, onToggleMute, isFullscreen, onToggleFullscreen }: StreamBarProps) {
   const [position, setPosition] = useState(engine.positionNow());
   useEffect(() => {
     const t = setInterval(() => setPosition(engine.positionNow()), 500);
@@ -564,7 +612,10 @@ function StreamBar({ engine, duration, hostName, muted, onToggleMute, isFullscre
         <span className="flex items-center gap-1.5 rounded-md bg-red-600 px-2 py-1 text-xs font-bold text-white">
           <span className="h-2 w-2 animate-pulse rounded-full bg-white" aria-hidden /> LIVE
         </span>
-        <span className="truncate text-sm text-muted">from {hostName}</span>
+        <span className="truncate text-sm text-muted">
+          from {hostName}
+          {relayed && <span title="A direct connection wasn't possible on this network"> · via server</span>}
+        </span>
         <span className="ml-1 whitespace-nowrap text-xs tabular-nums text-muted sm:text-sm">
           {formatTime(position)} {duration > 0 && <>/ {formatTime(duration)}</>}
         </span>

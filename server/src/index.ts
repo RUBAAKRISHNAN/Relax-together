@@ -270,9 +270,9 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
   allowRequest: (req, cb) => cb(null, isAllowedOrigin(req.headers.origin)),
   pingInterval: 10_000,
   pingTimeout: 8_000,
-  // Socket messages stay small (big payloads such as files and subtitles go over HTTP);
-  // hosting proxies also drop large WebSocket frames.
-  maxHttpBufferSize: 64 * 1024,
+  // Socket messages stay small (files and subtitles go over HTTP): relayed movie pieces are at most
+  // 96 KB, well below the size at which hosting proxies drop WebSocket frames.
+  maxHttpBufferSize: 128 * 1024,
 });
 
 const registered = registerSocketHandlers(io, store, uploads);
