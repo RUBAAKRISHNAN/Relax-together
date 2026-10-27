@@ -22,6 +22,8 @@ export interface AudioMenuProps {
   current: string | null;
   onChange: (id: string) => void;
   busy?: boolean;
+  /** Shown under the list, e.g. why there's only one choice. */
+  note?: string;
 }
 
 export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFullscreen, onSkip, audio }: PlayerControlsProps) {
@@ -131,7 +133,7 @@ export function PlayerControls({ engine, state, isHost, isFullscreen, onToggleFu
         )}
 
         <div className="ml-auto flex items-center gap-0.5">
-          {audio && audio.tracks.length > 1 && <AudioMenu {...audio} />}
+          {audio && <AudioMenu {...audio} />}
           <button type="button" className="icon-btn" onClick={() => engine.toggleMute()} disabled={!state.playerReady} aria-label={volume === 0 ? 'Unmute' : 'Mute'}>
             <VolumeIcon className="h-5 w-5" aria-hidden />
           </button>
@@ -195,7 +197,7 @@ function LiveBadge({ atEdge, behind, onGoLive }: LiveBadgeProps) {
 }
 
 /** Picks the audio language (per person: everyone can listen in their own language). */
-function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
+export function AudioMenu({ tracks, current, onChange, busy, note }: AudioMenuProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -210,9 +212,10 @@ function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
     };
   }, [open]);
   const currentLabel = tracks.find((t) => t.id === current)?.label ?? 'Audio';
+  const single = tracks.length < 2;
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="group relative">
       <button
         type="button"
         className={`icon-btn ${open ? 'bg-line/10' : ''}`}
@@ -220,10 +223,20 @@ function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Audio language: ${currentLabel}`}
-        title={`Audio: ${currentLabel}`}
       >
         <Languages className={`h-5 w-5 ${busy ? 'animate-pulse' : ''}`} aria-hidden />
       </button>
+      {/* Hover (or keyboard focus) says which audio is playing. */}
+      {!open && (
+        <span
+          role="tooltip"
+          className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 -translate-x-1/2 whitespace-nowrap rounded-lg bg-zinc-900/95 px-2.5 py-1.5 text-xs text-white opacity-0 shadow-lg ring-1 ring-white/10 transition-opacity duration-150 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+        >
+          <span className="text-white/60">Audio: </span>
+          <span className="font-semibold">{currentLabel}</span>
+          {!single && <span className="text-white/60"> · {tracks.length} available</span>}
+        </span>
+      )}
       <AnimatePresence>
         {open && (
           <motion.ul
@@ -246,6 +259,7 @@ function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
                     setOpen(false);
                     if (t.id !== current) onChange(t.id);
                   }}
+                  title={t.label}
                   className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none"
                 >
                   <Check className={`h-4 w-4 shrink-0 ${t.id === current ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
@@ -253,6 +267,9 @@ function AudioMenu({ tracks, current, onChange, busy }: AudioMenuProps) {
                 </button>
               </li>
             ))}
+            {(note || single) && (
+              <li className="px-3 pb-2 pt-1 text-xs text-white/50">{note ?? 'This movie has only one audio track.'}</li>
+            )}
           </motion.ul>
         )}
       </AnimatePresence>

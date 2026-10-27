@@ -67,6 +67,12 @@ const BUFFERING_STATUS_DELAY_MS = 500;
  * "settle" window viewers nudge from a tighter threshold than the steady-state 0.3s. */
 const SETTLE_MS = 5000;
 const SETTLE_NUDGE_THRESHOLD = 0.12;
+/**
+ * Movie files on this device (own copies) can be held much tighter than YouTube: the <video>
+ * element changes speed smoothly at any rate and seeks almost instantly. Small gaps are closed
+ * with a ±5% speed nudge (inaudible with pitch kept) rather than a seek, which would hiccup.
+ */
+const FINE = { HARD_SEEK: 0.6, NUDGE: 0.06, SETTLE_NUDGE: 0.04, CAUGHT_UP: 0.015 };
 /** Within this many seconds of the live edge we show the red "LIVE" badge. */
 const LIVE_EDGE_TOLERANCE = 10;
 /** YouTube's own live latency rarely exceeds this, which caps how far behind "live" can be. */
@@ -133,6 +139,7 @@ export class SyncEngine {
     if (this.started) return;
     this.started = true;
     this.socket.on('player:sync', this.handleSync);
+    document.addEventListener('visibilitychange', this.onVisible);
     this.intervals = [
       setInterval(this.correctDrift, SYNC.DRIFT_CHECK_MS),
       setInterval(this.sendHeartbeat, SYNC.HEARTBEAT_MS),
@@ -143,11 +150,28 @@ export class SyncEngine {
   stop() {
     this.started = false;
     this.socket.off('player:sync', this.handleSync);
+    document.removeEventListener('visibilitychange', this.onVisible);
     this.intervals.forEach(clearInterval);
     this.intervals = [];
     this.clearNudge();
     if (this.autoplayTimer) clearTimeout(this.autoplayTimer);
   }
+
+  /**
+   * Back on the tab (or the phone was unlocked): timers were throttled meanwhile, so catch up now.
+   * Waits a moment for the clock re-measure that also runs on visibility.
+   */
+  private onVisible = () => {
+    if (document.visibilityState !== 'visible') return;
+    setTimeout(() => {
+      if (this.isHost) this.sendHeartbeat();
+      else {
+        this.guardUntil = 0;
+        this.lastHardSeekAt = 0;
+        this.correctDrift();
+      }
+    }, 600);
+  };
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -387,28 +411,28 @@ export class SyncEngine {
 
     const drift = this.playerTime() - expected;
     const abs = Math.abs(drift);
+    const settling = performance.now() < this.settleUntil;
+    const fine = !!p.hasInstantSeek?.();
+    const hardSeekAt = fine ? FINE.HARD_SEEK : SYNC.HARD_SEEK_THRESHOLD;
+    const nudgeAt = fine ? (settling ? FINE.SETTLE_NUDGE : FINE.NUDGE) : settling ? SETTLE_NUDGE_THRESHOLD : SYNC.NUDGE_THRESHOLD;
+    const caughtUp = fine ? FINE.CAUGHT_UP : SYNC.CAUGHT_UP_THRESHOLD;
 
     // Learn how long seeks take on this connection so the next hard seek lands on time.
     // Only from ordinary seeks: a long stall (e.g. network outage) says nothing about seek latency.
     if (this.pendingSeekCheck && performance.now() - this.lastHardSeekAt > 1200) {
       this.pendingSeekCheck = false;
-      if (abs < SYNC.HARD_SEEK_THRESHOLD) {
+      if (abs < hardSeekAt) {
         this.seekLead = Math.min(MAX_SEEK_LEAD, Math.max(0, this.seekLead - drift * 0.6));
       }
     }
 
-    if (abs > SYNC.HARD_SEEK_THRESHOLD) {
-      if (performance.now() - this.lastHardSeekAt > HARD_SEEK_COOLDOWN_MS) this.hardSeek(expected);
-    } else if (
-      p.hasInstantSeek?.() &&
-      abs > (performance.now() < this.settleUntil ? SETTLE_NUDGE_THRESHOLD : SYNC.NUDGE_THRESHOLD) &&
-      performance.now() - this.lastHardSeekAt > HARD_SEEK_COOLDOWN_MS
-    ) {
-      // A file on this device seeks instantly, so jump straight there instead of a slow catch-up.
-      this.hardSeek(expected);
-    } else if (abs > (performance.now() < this.settleUntil ? SETTLE_NUDGE_THRESHOLD : SYNC.NUDGE_THRESHOLD)) {
+    if (abs > hardSeekAt) {
+      // Own copies seek almost instantly, so they don't need the long cooldown.
+      const cooldown = fine ? 1200 : HARD_SEEK_COOLDOWN_MS;
+      if (performance.now() - this.lastHardSeekAt > cooldown) this.hardSeek(expected);
+    } else if (abs > nudgeAt) {
       this.nudge(drift);
-    } else if (this.nudgeDirection !== 0 && (abs < SYNC.CAUGHT_UP_THRESHOLD || Math.sign(-drift) !== this.nudgeDirection)) {
+    } else if (this.nudgeDirection !== 0 && (abs < caughtUp || Math.sign(-drift) !== this.nudgeDirection)) {
       this.clearNudge();
     }
 
@@ -421,13 +445,13 @@ export class SyncEngine {
     const p = this.player;
     if (!p) return;
     const direction: 1 | -1 = drift > 0 ? -1 : 1;
-    if (this.nudgeDirection === direction) {
+    const rate = this.pickNudgeRate(direction, Math.abs(drift));
+    if (this.nudgeDirection === direction && rate === this.nudgeRate) {
       // The YouTube player silently drops a rate set while a video is starting; re-apply it.
-      if (this.nudgeRate && Math.abs(p.getPlaybackRate() - this.nudgeRate) > 0.001) p.setPlaybackRate(this.nudgeRate);
+      if (rate && Math.abs(p.getPlaybackRate() - rate) > 0.001) p.setPlaybackRate(rate);
       return;
     }
 
-    const rate = this.pickNudgeRate(direction);
     if (!rate) {
       // No usable speed on this player: a seek is the only way to close the gap.
       if (performance.now() - this.lastHardSeekAt > HARD_SEEK_COOLDOWN_MS) this.hardSeek(this.expectedTime());
@@ -443,11 +467,16 @@ export class SyncEngine {
     this.nudgeTimer = setTimeout(() => this.clearNudge(), ms);
   }
 
-  /** Prefer 1.05 / 0.95; fall back to the closest speed the player supports (often 1.25 / 0.75). */
-  private pickNudgeRate(direction: 1 | -1): number | null {
+  /**
+   * Prefer 1.05 / 0.95 (1.08 / 0.92 for bigger gaps where the player offers it, so a half-second
+   * gap closes in ~6 s); fall back to the closest speed the player supports (often 1.25 / 0.75).
+   */
+  private pickNudgeRate(direction: 1 | -1, gap: number): number | null {
     const rates = this.player?.getAvailablePlaybackRates() ?? [];
+    const has = (r: number) => rates.some((x) => Math.abs(x - r) < 0.001);
+    if (gap > 0.25 && has(1 + direction * 0.08)) return 1 + direction * 0.08;
     const preferred = 1 + direction * 0.05;
-    if (rates.some((r) => Math.abs(r - preferred) < 0.001)) return preferred;
+    if (has(preferred)) return preferred;
     const candidates = rates
       .filter((r) => (direction > 0 ? r > 1 && r <= 1.5 : r < 1 && r >= 0.5))
       .sort((a, b) => Math.abs(a - 1) - Math.abs(b - 1));

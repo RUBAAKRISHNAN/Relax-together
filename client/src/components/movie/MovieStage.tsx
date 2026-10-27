@@ -14,7 +14,7 @@ import { parseSubtitles } from '../../lib/subtitles';
 import type { EngineState, SyncEngine } from '../../lib/syncEngine';
 import { VideoElementPlayer, type VideoSource } from '../../lib/videoElementPlayer';
 import { FloatingReactions } from '../FloatingReactions';
-import { type AudioMenuProps, PlayerControls } from '../PlayerControls';
+import { AudioMenu, type AudioMenuProps, PlayerControls } from '../PlayerControls';
 import { ReactionBar } from '../ReactionBar';
 import { useToast } from '../Toasts';
 import { FullscreenBar } from '../VideoStage';
@@ -99,7 +99,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
       onStateChange: (s) => engine.onPlayerStateChange(s),
       onError: (code) => engine.onPlayerError(code),
       onNoPicture: () => setNoPicture(true),
-      onAudioTracks: (tracks, current) => setPlayerAudio(tracks.length > 1 ? { tracks, current } : null),
+      onAudioTracks: (tracks, current) => setPlayerAudio(tracks.length ? { tracks, current } : null),
     });
     playerRef.current = player;
     return () => {
@@ -291,7 +291,10 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
     ? { tracks: fileAudio.tracks, current: audioChoice, onChange: chooseAudio }
     : playerAudio
       ? { ...playerAudio, onChange: chooseAudio }
-      : undefined;
+      : movie
+        ? // Nothing to choose from (one audio track, or a format we can't read): still say what's playing.
+          { tracks: [{ id: 'original', label: 'Original audio' }], current: 'original', onChange: () => {} }
+        : undefined;
 
   // ---------------------------------------------------------------- fullscreen + subtitles
 
@@ -664,6 +667,13 @@ interface StreamBarProps {
   onToggleFullscreen?: () => void;
 }
 
+const HOST_AUDIO: AudioMenuProps = {
+  tracks: [{ id: 'host', label: "Host's audio" }],
+  current: 'host',
+  onChange: () => {},
+  note: 'A live stream carries the audio the host is playing.',
+};
+
 /** Controls for people watching the host's live stream: there's nothing to seek, just watch. */
 function StreamBar({ engine, relayed, duration, hostName, muted, onToggleMute, isFullscreen, onToggleFullscreen }: StreamBarProps) {
   const [position, setPosition] = useState(engine.positionNow());
@@ -689,6 +699,7 @@ function StreamBar({ engine, relayed, duration, hostName, muted, onToggleMute, i
           {formatTime(position)} {duration > 0 && <>/ {formatTime(duration)}</>}
         </span>
         <div className="ml-auto flex items-center gap-0.5">
+          <AudioMenu {...HOST_AUDIO} />
           <button type="button" className="icon-btn" onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
             {muted ? <VolumeX className="h-5 w-5" aria-hidden /> : <Volume2 className="h-5 w-5" aria-hidden />}
           </button>

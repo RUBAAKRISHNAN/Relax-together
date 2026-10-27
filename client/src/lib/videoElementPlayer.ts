@@ -220,9 +220,9 @@ export class VideoElementPlayer implements MediaPlayer {
     this.video.playbackRate = rate;
   }
 
-  /** Any speed works on <video>; ±5% with pitch preserved is hard to notice in a movie. */
+  /** Any speed works on <video>; ±5–8% with pitch preserved is hard to notice in a movie. */
   getAvailablePlaybackRates() {
-    return [0.95, 1, 1.05];
+    return [0.92, 0.95, 1, 1.05, 1.08];
   }
 
   getVolume() {

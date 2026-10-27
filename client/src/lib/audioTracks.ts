@@ -169,7 +169,7 @@ function parseMatroskaTracks(file: Blob, payload: Uint8Array, payloadOffset: num
     entries.push(entry);
   }
   const audio = entries.filter((e) => e.type === 2);
-  if (audio.length < 2) return null;
+  if (!audio.length) return null;
 
   const tracks = audio.map((e, i) => ({ id: String(e.number), label: makeLabel(i, e.name, e.lang, e.channels) }));
   return {
@@ -296,7 +296,7 @@ function parseMoov(file: Blob, moov: Uint8Array, moovOffset: number): FileAudioT
     }
     audio.push(track);
   }
-  if (audio.length < 2) return null;
+  if (!audio.length) return null;
 
   return {
     tracks: audio.map((t, i) => ({ id: String(t.id), label: makeLabel(i, t.name, t.lang, t.channels) })),
@@ -310,10 +310,13 @@ function parseMoov(file: Blob, moov: Uint8Array, moovOffset: number): FileAudioT
   };
 }
 
-/** Lists a movie file's audio tracks (when it has more than one) and how to pick one. */
+/** Lists a movie file's audio tracks and how to pick one. */
 export async function readFileAudioTracks(file: Blob): Promise<FileAudioTracks | null> {
   try {
-    return (await readMatroska(file)) ?? (await readMp4(file));
+    const info = (await readMatroska(file)) ?? (await readMp4(file));
+    // A lone track with no name or language is just the movie's sound.
+    if (info?.tracks.length === 1) info.tracks[0].label = info.tracks[0].label.replace(/^Audio 1\b/, 'Original audio');
+    return info;
   } catch {
     return null;
   }
