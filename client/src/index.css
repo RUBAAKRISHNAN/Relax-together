@@ -108,6 +108,15 @@
   --tw-backdrop-blur: blur(10px);
 }
 
+/* Movie rooms: no frosted glass next to a playing movie. A backdrop blur is redrawn whenever
+   anything behind it changes (the glow follows the picture), which costs the GPU time the video
+   needs on laptops and phones. The theatre backdrop is dark and plain, so solid panels look the same. */
+.movie-room .glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background-color: rgb(20 14 12 / 0.92);
+}
+
 /* The YouTube API replaces our mount node with an iframe; make it fill the stage. */
 .yt-mount iframe {
   position: absolute;

@@ -173,8 +173,8 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
   useEffect(() => {
     if (!hostStreaming) return;
     const el = videoRef.current!;
-    const host = new StreamHost(socket, setPeerStates);
-    const relay = new RelayHost(socket);
+    const host = new StreamHost(socket, setPeerStates, el);
+    const relay = new RelayHost(socket, el);
     streamHostRef.current = host;
     let captured: MediaStream | null = null;
     const capture = () => {
@@ -624,31 +624,48 @@ function TapOverlay({ label, onTap }: { label: string; onTap: () => void }) {
  * (a few times a second) and blurred up. Drawing a video into a canvas is allowed even for
  * cross-origin links, since we never read the pixels back.
  */
+/**
+ * Phones and low-power devices skip the glow: there the GPU time is better spent on the movie.
+ * (It's barely visible on a phone-width screen anyway.)
+ */
+const glowSupported =
+  typeof window !== 'undefined' &&
+  !window.matchMedia('(pointer: coarse)').matches &&
+  !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
+  (navigator.hardwareConcurrency ?? 8) > 4;
+
+/**
+ * The movie's colours glowing around the screen. Kept cheap: a 6×4 canvas the browser stretches
+ * smoothly (already soft, so no CSS blur filter to redraw) with edges faded by a mask, updated
+ * twice a second.
+ */
 function Ambilight({ videoRef, active }: { videoRef: React.RefObject<HTMLVideoElement>; active: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const on = active && glowSupported;
   useEffect(() => {
-    if (!active) return;
+    if (!on) return;
     const ctx = canvasRef.current?.getContext('2d');
     if (!ctx) return;
     const timer = setInterval(() => {
       const v = videoRef.current;
-      if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !document.hidden) {
+      if (v && !v.paused && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !document.hidden) {
         try {
-          ctx.drawImage(v, 0, 0, 32, 18);
+          ctx.drawImage(v, 0, 0, 6, 4);
         } catch {
           /* frame not ready */
         }
       }
-    }, 250);
+    }, 500);
     return () => clearInterval(timer);
-  }, [videoRef, active]);
+  }, [videoRef, on]);
+  if (!glowSupported) return null;
   return (
     <canvas
       ref={canvasRef}
-      width={32}
-      height={18}
-      className={`pointer-events-none absolute -inset-6 -z-10 h-[calc(100%+3rem)] w-[calc(100%+3rem)] rounded-[3rem] blur-3xl saturate-150 transition-opacity duration-1000 ${
-        active ? 'opacity-70' : 'opacity-0'
+      width={6}
+      height={4}
+      className={`pointer-events-none absolute -inset-10 -z-10 h-[calc(100%+5rem)] w-[calc(100%+5rem)] transition-opacity duration-1000 [mask-image:radial-gradient(closest-side,#000_55%,transparent)] ${
+        on ? 'opacity-60' : 'opacity-0'
       }`}
       aria-hidden
     />

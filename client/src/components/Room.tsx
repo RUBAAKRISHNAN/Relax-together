@@ -120,7 +120,7 @@ export function Room({ roomId, name, onLeave }: RoomProps) {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={`relative isolate flex h-dvh flex-col ${isMusic ? 'music-room' : ''}`} {...dropProps}>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={`relative isolate flex h-dvh flex-col ${isMusic ? 'music-room' : isMovie ? 'movie-room' : ''}`} {...dropProps}>
       {/* Movie rooms dim the lights: a dark theatre backdrop whatever the theme. */}
       {isMovie && <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_at_50%_-10%,#3a1406_0%,#0b0605_45%,#030202_100%)]" aria-hidden />}
       {isMusic && snapshot && (

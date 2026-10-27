@@ -13,7 +13,14 @@ import type { AppSocket } from './socket';
  * while the host's list updates, retries after a network blip) can never get cross-wired.
  */
 
-const VIDEO_BITRATE = 4_000_000;
+/**
+ * Every viewer gets its own encode on the host's device, so the picture is capped at 720p/30fps:
+ * a full-resolution 1080p/4K encode per friend overloads the host, which then stutters for
+ * everyone (the host included). 720p at this bitrate still looks sharp on a laptop or phone.
+ */
+const VIDEO_BITRATE = 2_500_000;
+const MAX_HEIGHT = 720;
+const MAX_FPS = 30;
 /** Viewer retry schedule after a failed/dropped connection (ms). */
 const RETRY_DELAYS = [1500, 3000, 6000, 10_000, 15_000];
 /** A "disconnected" connection often recovers by itself; give it this long before retrying. */
@@ -60,6 +67,8 @@ export class StreamHost {
   constructor(
     private socket: AppSocket,
     private onPeersChange: (states: Record<UserId, RTCPeerConnectionState>) => void,
+    /** The host's movie element, to size the encode from. */
+    private video: HTMLVideoElement | null = null,
   ) {
     socket.on('rtc:signal', this.onSignal);
     void iceServers(); // warm the ICE config so the first viewer isn't kept waiting for it
@@ -115,7 +124,11 @@ export class StreamHost {
     this.peers.set(id, peer);
     const current = () => this.peers.get(id) === peer;
 
-    for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    for (const track of stream.getTracks()) {
+      // A movie should keep moving: under load, drop sharpness rather than frames.
+      if (track.kind === 'video' && !track.contentHint) track.contentHint = 'motion';
+      pc.addTrack(track, stream);
+    }
     pc.onicecandidate = (e) => e.candidate && current() && this.send(id, { type: 'candidate', candidate: e.candidate.toJSON(), sid });
     pc.onconnectionstatechange = () => {
       if (!current()) return;
@@ -128,13 +141,21 @@ export class StreamHost {
       if (!current()) return;
       await pc.setLocalDescription(offer);
       this.send(id, { type: 'offer', sdp: offer.sdp ?? '', sid });
-      // Movies favour a sharp picture; cap the bitrate so a few viewers fit in a home upload.
+      // Cap size, frame rate and bitrate so a few viewers fit in the host's CPU and home upload.
+      // The encoder scales the picture itself (cheap, and it keeps working in a background tab).
+      const height = this.video?.videoHeight || sourceHeight(stream);
       for (const sender of pc.getSenders()) {
         if (sender.track?.kind !== 'video') continue;
         const params = sender.getParameters();
         params.encodings = params.encodings?.length ? params.encodings : [{}];
         params.encodings[0].maxBitrate = VIDEO_BITRATE;
+        params.encodings[0].maxFramerate = MAX_FPS;
+        if (height > MAX_HEIGHT) params.encodings[0].scaleResolutionDownBy = height / MAX_HEIGHT;
         await sender.setParameters(params).catch(() => {});
+        // Not every browser accepts this one, so it goes separately.
+        const more = sender.getParameters() as RTCRtpSendParameters & { degradationPreference?: string };
+        more.degradationPreference = 'maintain-framerate';
+        await sender.setParameters(more).catch(() => {});
       }
     } catch {
       if (current()) this.close(id);
@@ -153,7 +174,7 @@ export class StreamHost {
     if (!peer || signal.sid !== peer.sid) return; // a reply to an older attempt
     try {
       if (signal.type === 'answer') {
-        if (peer.pc.signalingState === 'have-local-offer') await peer.pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+        if (peer.pc.signalingState === 'have-local-offer') await peer.pc.setRemoteDescription({ type: 'answer', sdp: withStartBitrate(signal.sdp) });
       } else if (signal.type === 'candidate') {
         await peer.pc.addIceCandidate(signal.candidate);
       }
@@ -308,6 +329,43 @@ export class StreamViewer {
     this.peer?.pc.close();
     this.peer = null;
   }
+}
+
+/** Where Chrome's bandwidth estimate starts and its floor (kbps) for the movie's video. */
+const START_KBPS = 1500;
+const MIN_KBPS = 500;
+
+/**
+ * Chrome starts a new video connection at ~300 kbps and ramps up over many seconds, so friends
+ * first see a blurry, choppy picture. Movies are a known heavy stream, so start it near where it
+ * will settle. (Chrome-only fmtp hints in the answer the host applies; other browsers ignore them.)
+ */
+function withStartBitrate(sdp: string): string {
+  const lines = sdp.split('\r\n');
+  const video = lines.findIndex((l) => l.startsWith('m=video'));
+  if (video < 0) return sdp;
+  const end = lines.findIndex((l, i) => i > video && l.startsWith('m='));
+  const section = lines.slice(video, end < 0 ? undefined : end);
+  const hint = `x-google-start-bitrate=${START_KBPS};x-google-min-bitrate=${MIN_KBPS}`;
+  const payloads = section
+    .filter((l) => /^a=rtpmap:\d+ (VP8|VP9|H264|AV1)\//i.test(l))
+    .map((l) => l.slice('a=rtpmap:'.length).split(' ')[0]);
+  const out = section.map((l) => {
+    const pt = payloads.find((p) => l.startsWith(`a=fmtp:${p} `));
+    return pt && !l.includes('x-google-start-bitrate') ? `${l};${hint}` : l;
+  });
+  // Codecs with no fmtp line yet (VP8 usually) get one.
+  for (const pt of payloads) {
+    if (!out.some((l) => l.startsWith(`a=fmtp:${pt} `))) {
+      const at = out.findIndex((l) => l.startsWith(`a=rtpmap:${pt} `));
+      out.splice(at + 1, 0, `a=fmtp:${pt} ${hint}`);
+    }
+  }
+  return [...lines.slice(0, video), ...out, ...(end < 0 ? [] : lines.slice(end))].join('\r\n');
+}
+
+function sourceHeight(stream: MediaStream): number {
+  return stream.getVideoTracks()[0]?.getSettings().height ?? 0;
 }
 
 /** video.captureStream() (Chrome/Edge, Safari 17+) or mozCaptureStream() (Firefox). */

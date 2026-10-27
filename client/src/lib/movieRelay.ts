@@ -11,6 +11,13 @@ import type { AppSocket } from './socket';
  */
 
 const VIDEO_BITRATE = 1_800_000;
+/**
+ * The recorder encodes in real time on the host's device and can't scale by itself; a 1080p/4K
+ * movie recorded at full size overloads it (choppy for the host, freezes for viewers). Bigger
+ * movies are drawn into a 720p canvas first and that is recorded instead.
+ */
+const MAX_HEIGHT = 720;
+const MAX_FPS = 30;
 const AUDIO_BITRATE = 128_000;
 /** Short slices keep latency low; each one is split into pieces under the proxy limit. */
 const SLICE_MS = 250;
@@ -41,8 +48,13 @@ export class RelayHost {
   private viewers = 0;
   private sendChain = Promise.resolve();
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private scaler: FrameScaler | null = null;
 
-  constructor(private socket: AppSocket) {
+  constructor(
+    private socket: AppSocket,
+    /** The host's movie element; big movies are scaled down from it before recording. */
+    private video: HTMLVideoElement | null = null,
+  ) {
     socket.on('relay:demand', this.onDemand);
   }
 
@@ -70,7 +82,7 @@ export class RelayHost {
     if (!this.stream || !mime || this.viewers === 0) return;
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(this.stream, { mimeType: mime, videoBitsPerSecond: VIDEO_BITRATE, audioBitsPerSecond: AUDIO_BITRATE });
+      recorder = new MediaRecorder(this.recordingStream(this.stream), { mimeType: mime, videoBitsPerSecond: VIDEO_BITRATE, audioBitsPerSecond: AUDIO_BITRATE });
     } catch {
       return;
     }
@@ -93,7 +105,17 @@ export class RelayHost {
     recorder.start(SLICE_MS);
   }
 
+  /** The stream to record: as captured, or with the picture scaled down to 720p. */
+  private recordingStream(stream: MediaStream): MediaStream {
+    const v = this.video;
+    if (!v || v.videoHeight <= MAX_HEIGHT || typeof HTMLCanvasElement.prototype.captureStream !== 'function') return stream;
+    this.scaler = new FrameScaler(v, MAX_HEIGHT);
+    return new MediaStream([this.scaler.track, ...stream.getAudioTracks()]);
+  }
+
   private stopRecording() {
+    this.scaler?.stop();
+    this.scaler = null;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
     const recorder = this.recorder;
@@ -105,6 +127,44 @@ export class RelayHost {
     this.socket.off('relay:demand', this.onDemand);
     this.viewers = 0;
     this.stopRecording();
+  }
+}
+
+/**
+ * Draws a video into a smaller canvas on every new frame, giving a scaled-down video track.
+ * Frames come from requestVideoFrameCallback while the tab is visible; it doesn't fire in a
+ * background tab, so a timer takes over there (timers aren't throttled while audio plays).
+ */
+class FrameScaler {
+  readonly track: MediaStreamTrack;
+  private stopped = false;
+  private timer: ReturnType<typeof setInterval>;
+
+  constructor(video: HTMLVideoElement, maxHeight: number) {
+    const scale = Math.min(1, maxHeight / video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round((video.videoWidth * scale) / 2) * 2;
+    canvas.height = Math.round((video.videoHeight * scale) / 2) * 2;
+    const ctx = canvas.getContext('2d', { alpha: false })!;
+    this.track = canvas.captureStream(MAX_FPS).getVideoTracks()[0];
+    const draw = () => {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    };
+    draw();
+    const hasFrameCallback = 'requestVideoFrameCallback' in video;
+    const onFrame = () => {
+      if (this.stopped) return;
+      draw();
+      video.requestVideoFrameCallback(onFrame);
+    };
+    if (hasFrameCallback) video.requestVideoFrameCallback(onFrame);
+    this.timer = setInterval(() => (!hasFrameCallback || document.hidden) && draw(), 1000 / MAX_FPS);
+  }
+
+  stop() {
+    this.stopped = true;
+    clearInterval(this.timer);
+    this.track.stop();
   }
 }
 
