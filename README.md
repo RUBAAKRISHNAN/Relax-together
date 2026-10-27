@@ -305,10 +305,11 @@ New project from your repo. Set the build command to `npm install --include=dev 
 
 ### Client → Vercel
 
-1. Import the repo and set **Root Directory** to `client`. Keep "Include files outside the root directory" enabled, because the client imports `../shared`.
-2. Framework preset: **Vite**. Build command `npm run build`, output directory `dist`.
-3. Environment variable: `VITE_SERVER_URL=https://your-server.onrender.com`
-4. `client/vercel.json` already rewrites all routes to `index.html`, so `/room/ABC123` links work.
+The repo-root `vercel.json` already holds the build settings (install at the root so the client can import `../shared`, build the client workspace, serve `client/dist`, and rewrite every route to `index.html` so `/room/ABC123` links work).
+
+1. In Vercel, choose **Add New → Project** and import the GitHub repo. Leave **Root Directory** as the repo root, and leave the framework preset as **Other**; `vercel.json` takes care of the rest.
+2. Add the environment variable `VITE_SERVER_URL=https://your-server.onrender.com`.
+3. Deploy. The CLI works too: run `vercel --prod` from the repo root.
 
 After both are deployed, make sure the server's `CLIENT_URL` exactly matches the Vercel URL (no trailing slash). Add preview URLs separated by commas if you need them.
 
