@@ -7,11 +7,13 @@ import type {
   MovieSource,
   ReactionEvent,
   RoomSnapshot,
+  SubtitleInfo,
   SubtitleTrack,
 } from '@shared/types';
 import { useToast } from '../components/Toasts';
 import { ServerClock } from '../lib/clock';
 import { getUserId } from '../lib/identity';
+import { SERVER_URL } from '../lib/env';
 import { createSocket, request } from '../lib/socket';
 import { SyncEngine } from '../lib/syncEngine';
 
@@ -43,6 +45,7 @@ export function useRoomSession(roomId: string, name: string, onFatal: (error: st
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [reactions, setReactions] = useState<FloatingReaction[]>([]);
   const [subtitles, setSubtitles] = useState<SubtitleTrack | null>(null);
+  const [subtitleInfo, setSubtitleInfo] = useState<SubtitleInfo | null>(null);
 
   useEffect(() => {
     const { socket, clock, engine, selfId } = session;
@@ -110,7 +113,7 @@ export function useRoomSession(roomId: string, name: string, onFatal: (error: st
     socket.on('reaction', onReaction);
     socket.on('room:notice', onNotice);
     socket.on('room:closed', onClosed);
-    socket.on('movie:subtitles', setSubtitles);
+    socket.on('movie:subtitles', setSubtitleInfo);
     engine.start();
     clock.start();
     socket.connect();
@@ -127,13 +130,28 @@ export function useRoomSession(roomId: string, name: string, onFatal: (error: st
       socket.off('reaction', onReaction);
       socket.off('room:notice', onNotice);
       socket.off('room:closed', onClosed);
-      socket.off('movie:subtitles', setSubtitles);
+      socket.off('movie:subtitles', setSubtitleInfo);
       engine.stop();
       clock.stop();
       socket.disconnect();
     };
     // onFatal/toast are stable for the lifetime of a room visit, so they're left out of the deps.
   }, [session, roomId, name]);
+
+  // Shared subtitles: the socket announces a version, the text is fetched over HTTP.
+  useEffect(() => {
+    if (!subtitleInfo) {
+      setSubtitles(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`${SERVER_URL}/api/rooms/${roomId}/subtitles?v=${subtitleInfo.version}`, { signal: controller.signal })
+      .then((res) => (res.ok ? res.text() : Promise.reject(new Error(String(res.status)))))
+      .then((text) => setSubtitles({ name: subtitleInfo.name, text }))
+      .catch((err: Error) => err.name !== 'AbortError' && toast("Couldn't load the shared subtitles.", 'error'));
+    return () => controller.abort();
+    // toast is stable for the lifetime of a room visit.
+  }, [subtitleInfo, roomId]);
 
   const actions = useMemo(() => {
     const { socket } = session;
@@ -149,9 +167,24 @@ export function useRoomSession(roomId: string, name: string, onFatal: (error: st
       setMood: async (mood: MoodId) => errorOf(await request(socket, 'room:mood', { mood })),
       loadMovie: async (source: MovieSource) => errorOf(await request(socket, 'movie:load', { source })),
       reportMovieReady: (videoId: string, state: MovieReadyState) => socket.emit('movie:ready', { videoId, state }),
-      shareSubtitles: async (track: SubtitleTrack | null) => errorOf(await request(socket, 'movie:subtitles', { track })),
+      shareSubtitles: async (track: SubtitleTrack | null): Promise<string | null> => {
+        if (!track) return errorOf(await request(socket, 'movie:clearSubtitles'));
+        const auth = await request<{ token: string }>(socket, 'room:uploadToken');
+        if (!auth.ok) return auth.error;
+        try {
+          const res = await fetch(`${SERVER_URL}/api/rooms/${roomId}/subtitles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Upload-Token': auth.data.token, 'X-File-Name': encodeURIComponent(track.name) },
+            body: track.text,
+          });
+          if (res.ok) return null;
+          return ((await res.json().catch(() => ({}))) as { error?: string }).error ?? 'Could not share the subtitles.';
+        } catch {
+          return "Couldn't reach the server.";
+        }
+      },
       getUploadToken: async (): Promise<{ token: string } | { error: string }> => {
-        const res = await request<{ token: string; expiresAt: number }>(socket, 'music:uploadToken');
+        const res = await request<{ token: string; expiresAt: number }>(socket, 'room:uploadToken');
         return res.ok ? { token: res.data.token } : { error: res.error };
       },
       sendChat: async (text: string) => errorOf(await request(socket, 'chat:send', { text })),
@@ -160,7 +193,7 @@ export function useRoomSession(roomId: string, name: string, onFatal: (error: st
         if (socket.connected) socket.emit('room:leave');
       },
     };
-  }, [session]);
+  }, [session, roomId]);
 
   return {
     selfId: session.selfId,

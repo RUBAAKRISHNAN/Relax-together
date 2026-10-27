@@ -3,6 +3,8 @@ import type { Server, Socket } from 'socket.io';
 import { CHAT_HISTORY_LIMIT, MAX_MEMBERS, MAX_QUEUE_LENGTH, MEMBER_GRACE_MS, MOVIE_SOURCE_PREFIX } from '@shared/constants';
 import type {
   AckResponse,
+  SubtitleInfo,
+  SubtitleTrack,
   ClientToServerEvents,
   ErrorCode,
   MovieSource,
@@ -122,6 +124,16 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       }
     };
     void Promise.all([worker(), worker()]).finally(() => resolving.delete(room.id));
+  }
+
+  const subtitleInfo = (room: Room): SubtitleInfo | null =>
+    room.subtitles ? { name: room.subtitles.name, version: room.subtitles.version } : null;
+
+  /** Shared subtitles changed (HTTP upload or clear): announce the new version; clients fetch the text. */
+  function setSubtitles(room: Room, by: ServerMember, track: SubtitleTrack | null) {
+    room.subtitles = track ? { ...track, version: (room.subtitles?.version ?? 0) + 1 } : null;
+    io.to(room.id).emit('movie:subtitles', subtitleInfo(room));
+    if (track) io.to(room.id).except(by.socketId ?? '').emit('room:notice', { kind: 'info', text: `${by.name} shared subtitles: ${track.name}` });
   }
 
   /** Called by the upload endpoint: plays right away if the room is silent, otherwise queues. */
@@ -303,7 +315,7 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       socket.to(room.id).emit('room:state', toSnapshot(room));
       if (isNew) socket.to(room.id).emit('room:notice', { kind: 'joined', text: `${name} joined the party` });
       // Subtitles aren't part of the snapshot (they can be large), so late joiners get them separately.
-      if (room.subtitles) socket.emit('movie:subtitles', room.subtitles);
+      if (room.subtitles) socket.emit('movie:subtitles', subtitleInfo(room));
     });
 
     on('room:leave', (ack) => {
@@ -460,17 +472,10 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       broadcastState(c.room);
     });
 
-    on('movie:subtitles', (raw, ack) => {
+    on('movie:clearSubtitles', (ack) => {
       const c = currentHost();
-      if (!c || c.room.mode !== 'movies') return reply(ack, fail('Only the host can share subtitles.', 'FORBIDDEN'));
-      if (!limiter.take('subtitles')) return reply(ack, fail('Too many subtitle changes.', 'RATE_LIMITED'));
-      const parsed = schemas.subtitles.safeParse(raw);
-      if (!parsed.success) return reply(ack, fail('That subtitle file is too large or invalid.', 'INVALID'));
-      c.room.subtitles = parsed.data.track;
-      io.to(c.room.id).emit('movie:subtitles', c.room.subtitles);
-      if (c.room.subtitles) {
-        socket.to(c.room.id).emit('room:notice', { kind: 'info', text: `${c.member.name} shared subtitles: ${c.room.subtitles.name}` });
-      }
+      if (!c || c.room.mode !== 'movies') return reply(ack, fail('Only the host can change subtitles.', 'FORBIDDEN'));
+      setSubtitles(c.room, c.member, null);
       reply(ack, ok(null));
     });
 
@@ -499,9 +504,9 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
       reply(ack, ok(null));
     });
 
-    on('music:uploadToken', (ack) => {
+    on('room:uploadToken', (ack) => {
       const c = current();
-      if (!c || c.room.mode !== 'music') return reply(ack, fail('Uploads are only available in music rooms.'));
+      if (!c || c.room.mode === 'youtube') return reply(ack, fail('Uploads are only available in music and movie rooms.'));
       if (!limiter.take('uploadToken')) return reply(ack, fail('Too many requests.', 'RATE_LIMITED'));
       reply(ack, ok(uploads.issueToken(c.room.id, c.member.id)));
     });
@@ -559,5 +564,5 @@ export function registerSocketHandlers(io: IO, store: RoomStore, uploads: Upload
     socket.on('disconnect', () => detach('disconnect'));
   });
 
-  return { addUploadedTrack };
+  return { addUploadedTrack, setSubtitles };
 }

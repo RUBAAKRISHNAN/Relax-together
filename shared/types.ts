@@ -55,6 +55,15 @@ export interface SubtitleTrack {
   text: string;
 }
 
+/**
+ * What the socket announces about shared subtitles. The text itself travels over HTTP
+ * (GET /api/rooms/:id/subtitles): hosting proxies drop large WebSocket messages.
+ */
+export interface SubtitleInfo {
+  name: string;
+  version: number;
+}
+
 /** Same shape as the DOM's RTCIceCandidateInit (redeclared because the server has no DOM types). */
 export interface IceCandidate {
   candidate?: string;
@@ -208,9 +217,11 @@ export interface ClientToServerEvents {
   'room:mood': (p: { mood: MoodId }, ack: Ack) => void;
   'movie:load': (p: { source: MovieSource }, ack: Ack) => void;
   'movie:ready': (p: { videoId: string; state: MovieReadyState }) => void;
-  'movie:subtitles': (p: { track: SubtitleTrack | null }, ack: Ack) => void;
+  /** Sharing goes over HTTP (POST /api/rooms/:id/subtitles); this only removes them. */
+  'movie:clearSubtitles': (ack: Ack) => void;
   'rtc:signal': (p: { to: UserId; signal: RtcSignal }) => void;
-  'music:uploadToken': (ack: Ack<{ token: string; expiresAt: number }>) => void;
+  /** Short-lived permission for HTTP uploads into the room (songs, subtitles). */
+  'room:uploadToken': (ack: Ack<{ token: string; expiresAt: number }>) => void;
   'chat:send': (p: { text: string }, ack: Ack) => void;
   'reaction:send': (p: { emoji: ReactionEmoji }) => void;
 }
@@ -219,7 +230,7 @@ export interface ServerToClientEvents {
   'room:state': (snapshot: RoomSnapshot) => void;
   'room:notice': (notice: RoomNotice) => void;
   'room:closed': (p: { reason: string }) => void;
-  'movie:subtitles': (track: SubtitleTrack | null) => void;
+  'movie:subtitles': (info: SubtitleInfo | null) => void;
   'rtc:signal': (p: { from: UserId; signal: RtcSignal }) => void;
   'player:sync': (ev: SyncEvent) => void;
   'chat:message': (msg: ChatMessage) => void;

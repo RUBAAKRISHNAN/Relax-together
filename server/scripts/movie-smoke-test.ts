@@ -3,7 +3,7 @@
  * Usage: npm run dev -w server   then   npm run test:movies -w server
  */
 import { io, type Socket } from 'socket.io-client';
-import type { AckResponse, ClientToServerEvents, RoomSnapshot, ServerToClientEvents, SubtitleTrack } from '@shared/types';
+import type { AckResponse, ClientToServerEvents, RoomSnapshot, ServerToClientEvents, SubtitleInfo } from '@shared/types';
 
 const URL = process.env.SERVER_URL ?? 'http://localhost:3001';
 type Client = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -54,27 +54,40 @@ async function main() {
   const sync = new Promise<{ action: string; isPlaying: boolean; videoId: string | null }>((r) => viewer.once('player:sync', r));
   const load = await call(host, 'movie:load', { source: LOCAL });
   const ev = await sync;
-  await sleep(100);
+  await sleep(400);
   check('host loads a movie; it starts paused for everyone', load.ok && ev.action === 'load' && !ev.isPlaying);
   check('room state carries the movie source', latest!.video?.movie?.kind === 'local' && latest!.video.videoId === ev.videoId);
   check('host is marked ready, others not yet', latest!.movieReady['movie-host-0001'] === 'ready' && !latest!.movieReady['movie-viewer-01']);
 
   viewer.emit('movie:ready', { videoId: ev.videoId!, state: 'mismatch' });
   viewer.emit('movie:ready', { videoId: 'movie:stale0000000', state: 'ready' });
-  await sleep(150);
+  // Wait for the update instead of a fixed delay, so this also works against a remote server.
+  for (let i = 0; i < 30 && latest!.movieReady['movie-viewer-01'] !== 'mismatch'; i++) await sleep(100);
+  await sleep(300);
   check('readiness is recorded (stale reports ignored)', latest!.movieReady['movie-viewer-01'] === 'mismatch');
 
-  const track: SubtitleTrack = { name: 'Night Train.srt', text: '1\n00:00:01,000 --> 00:00:03,000\nHello\n' };
-  const viewerSubs = await call(viewer, 'movie:subtitles', { track });
-  check('viewers cannot share subtitles for everyone', !viewerSubs.ok);
-  const gotSubs = new Promise<SubtitleTrack | null>((r) => third.once('movie:subtitles', r));
-  const shared = await call(host, 'movie:subtitles', { track });
-  check('host shares subtitles with the room', shared.ok && (await gotSubs)?.text === track.text);
-  const huge = await call(host, 'movie:subtitles', { track: { name: 'big.srt', text: 'x'.repeat(900_000) } });
-  check('oversized subtitle files are rejected', !huge.ok);
+  // Subtitles go over HTTP (big files would be dropped by hosting proxies as WebSocket messages).
+  const text = '1\n00:00:01,000 --> 00:00:03,000\nHéllo ✓\n' + 'Long line of dialogue. '.repeat(20_000); // ~460 KB
+  const postSubs = (token: string, body: string) =>
+    fetch(`${URL}/api/rooms/${roomId}/subtitles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Upload-Token': token, 'X-File-Name': encodeURIComponent('Night Train.srt') },
+      body,
+    });
+  const viewerToken = await call<{ token: string }>(viewer, 'room:uploadToken');
+  const viewerPost = await postSubs(viewerToken.ok ? viewerToken.data.token : '', text);
+  check('viewers cannot share subtitles for everyone', viewerPost.status === 403);
+  const hostToken = await call<{ token: string }>(host, 'room:uploadToken');
+  const gotInfo = new Promise<SubtitleInfo | null>((r) => third.once('movie:subtitles', r));
+  const hostPost = await postSubs(hostToken.ok ? hostToken.data.token : '', text);
+  const info = await Promise.race([gotInfo, sleep(5000).then(() => null)]);
+  const fetched = info ? await (await fetch(`${URL}/api/rooms/${roomId}/subtitles?v=${info.version}`)).text() : '';
+  check('host shares a 460 KB subtitle file; viewers fetch it', hostPost.status === 201 && fetched === text, `(${hostPost.status}, ${fetched.length} chars)`);
+  const huge = await postSubs(hostToken.ok ? hostToken.data.token : '', 'x'.repeat(900_000));
+  check('oversized subtitle files are rejected', huge.status === 413);
 
   const late = await connect();
-  const lateSubs = new Promise<SubtitleTrack | null>((r) => late.once('movie:subtitles', r));
+  const lateSubs = new Promise<SubtitleInfo | null>((r) => late.once('movie:subtitles', r));
   await call(late, 'room:join', { roomId, userId: 'movie-viewer-03', name: 'Ana' });
   check('late joiners receive the shared subtitles', (await Promise.race([lateSubs, sleep(2000).then(() => null)]))?.name === 'Night Train.srt');
 
@@ -86,11 +99,11 @@ async function main() {
   let leaked = false;
   third.once('rtc:signal', () => (leaked = true));
   viewer.emit('rtc:signal', { to: 'movie-viewer-02', signal: { type: 'hello' } });
-  await sleep(500);
+  await sleep(1000);
   check('viewer → viewer signalling is blocked', !leaked);
 
   const stream = await call(host, 'movie:load', { source: { kind: 'stream', name: 'Live', size: 1, fingerprint: '1:00000000aaaaaaaa', duration: 60 } });
-  await sleep(150);
+  await sleep(600);
   check('stream source loads and resets readiness', stream.ok && latest!.video?.movie?.kind === 'stream' && Object.keys(latest!.movieReady).length === 1);
 
   for (const s of [host, viewer, third, late]) s.disconnect();

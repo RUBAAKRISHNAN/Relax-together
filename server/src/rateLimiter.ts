@@ -36,7 +36,6 @@ export const SOCKET_LIMITS = {
   mood: { capacity: 6, refillPerSec: 0.5 },
   uploadToken: { capacity: 5, refillPerSec: 0.1 },
   ready: { capacity: 10, refillPerSec: 1 },
-  subtitles: { capacity: 3, refillPerSec: 0.1 },
   // ICE candidates arrive in bursts while a connection is negotiated.
   rtc: { capacity: 80, refillPerSec: 10 },
 } satisfies Record<string, Rule>;

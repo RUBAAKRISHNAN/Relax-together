@@ -108,9 +108,8 @@ export const schemas = {
     state: z.enum(['ready', 'missing', 'mismatch', 'error']),
   }),
   subtitles: z.object({
-    track: z
-      .object({ name: z.string().max(200).transform(sanitizeText), text: z.string().min(1).max(SUBTITLE_MAX_CHARS) })
-      .nullable(),
+    name: z.string().max(200).transform(sanitizeText).transform((s) => s || 'Subtitles'),
+    text: z.string().min(1).max(SUBTITLE_MAX_CHARS),
   }),
   rtcSignal: z.object({ to: userId, signal: rtcSignal }),
   chat: z.object({

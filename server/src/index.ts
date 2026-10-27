@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import cors from 'cors';
 import express from 'express';
 import { Server } from 'socket.io';
-import { UPLOAD_MAX_BYTES, normalizeRoomCode } from '@shared/constants';
+import { SUBTITLE_MAX_CHARS, UPLOAD_MAX_BYTES, normalizeRoomCode } from '@shared/constants';
 import type {
   ClientToServerEvents,
   MusicSearchResponse,
@@ -32,6 +32,7 @@ const createLimiter = new IpRateLimiter({ capacity: 10, refillPerSec: 10 / 60 })
 const suggestLimiter = new IpRateLimiter({ capacity: 20, refillPerSec: 30 / 60 });
 const searchLimiter = new IpRateLimiter({ capacity: 30, refillPerSec: 40 / 60 });
 const uploadLimiter = new IpRateLimiter({ capacity: 15, refillPerSec: 15 / 600 });
+const subtitleLimiter = new IpRateLimiter({ capacity: 5, refillPerSec: 5 / 600 });
 const FILE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const app = express();
@@ -122,7 +123,7 @@ app.get('/api/music/search', async (req, res) => {
 
 /**
  * Upload a song from your device. The body is the raw file; the per-member token comes from the
- * socket ('music:uploadToken'), so only people in the room can add files to it.
+ * socket ('room:uploadToken'), so only people in the room can add files to it.
  */
 app.post(
   '/api/rooms/:id/uploads',
@@ -183,6 +184,59 @@ app.get(['/media/:roomId/:fileId', '/media/:roomId/:fileId/cover'], (req, res) =
   res.sendFile(file.path, { acceptRanges: true, lastModified: false, dotfiles: 'allow' });
 });
 
+/**
+ * Shared subtitles for movie rooms. They go over HTTP rather than the socket because hosting
+ * proxies (Render's included) drop WebSocket messages above a few hundred KB, and SRT files for
+ * long films can be that big. The socket only announces { name, version }.
+ */
+app.post(
+  '/api/rooms/:id/subtitles',
+  express.text({ type: () => true, limit: SUBTITLE_MAX_CHARS * 4 }),
+  (req, res) => {
+    const roomId = normalizeRoomCode(req.params.id);
+    const room = roomId ? store.get(roomId) : undefined;
+    if (!room || room.mode !== 'movies') {
+      res.status(404).json({ error: 'Movie room not found.' });
+      return;
+    }
+    const auth = uploads.checkToken(req.get('X-Upload-Token'), room.id);
+    const member = auth ? room.members.get(auth.userId) : undefined;
+    if (!member?.online || room.hostId !== member.id) {
+      res.status(403).json({ error: 'Only the host can share subtitles.' });
+      return;
+    }
+    if (!subtitleLimiter.take(req.ip ?? 'unknown')) {
+      res.status(429).json({ error: 'Too many subtitle changes. Try again in a minute.' });
+      return;
+    }
+    let name = 'Subtitles';
+    try {
+      name = decodeURIComponent(req.get('X-File-Name') ?? name);
+    } catch {
+      /* keep default */
+    }
+    const parsed = schemas.subtitles.safeParse({ name, text: typeof req.body === 'string' ? req.body : '' });
+    if (!parsed.success) {
+      res.status(413).json({ error: 'That subtitle file is too large or empty.' });
+      return;
+    }
+    registered.setSubtitles(room, member, parsed.data);
+    res.status(201).json({ ok: true });
+  },
+);
+
+app.get('/api/rooms/:id/subtitles', (req, res) => {
+  const roomId = normalizeRoomCode(req.params.id);
+  const subs = roomId ? store.get(roomId)?.subtitles : undefined;
+  if (!subs) {
+    res.status(404).end();
+    return;
+  }
+  // The version is in the query string, so each version can be cached forever.
+  res.set({ 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=31536000, immutable' });
+  res.send(subs.text);
+});
+
 // Body-size and parse errors from express.raw/json come back as tidy JSON.
 app.use((err: { status?: number; type?: string }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err?.type === 'entity.too.large') {
@@ -204,8 +258,9 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
   allowRequest: (req, cb) => cb(null, isAllowedOrigin(req.headers.origin)),
   pingInterval: 10_000,
   pingTimeout: 8_000,
-  // Big enough for a shared subtitle file (validated and rate limited per message).
-  maxHttpBufferSize: 1024 * 1024,
+  // Socket messages stay small (big payloads such as files and subtitles go over HTTP);
+  // hosting proxies also drop large WebSocket frames.
+  maxHttpBufferSize: 64 * 1024,
 });
 
 const registered = registerSocketHandlers(io, store, uploads);

@@ -28,7 +28,7 @@ export interface Room {
   mood: MoodId;
   /** Movie rooms: readiness per member for the current movie, and the shared subtitles. */
   movieReady: Map<UserId, MovieReadyState>;
-  subtitles: SubtitleTrack | null;
+  subtitles: (SubtitleTrack & { version: number }) | null;
   /** Insertion order == join order, which makes "oldest member" lookups trivial. */
   members: Map<UserId, ServerMember>;
   playback: PlaybackState;
