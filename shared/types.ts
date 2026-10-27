@@ -74,8 +74,9 @@ export interface IceCandidate {
 
 /** WebRTC signalling relayed between the host and a viewer for "stream from my device". */
 export type RtcSignal =
-  | { type: 'offer' | 'answer'; sdp: string }
-  | { type: 'candidate'; candidate: IceCandidate }
+  /** `sid` identifies one connection attempt, so messages from an older attempt are ignored. */
+  | { type: 'offer' | 'answer'; sdp: string; sid: string }
+  | { type: 'candidate'; candidate: IceCandidate; sid: string }
   /** A viewer asking the host for a (new) offer, e.g. after joining mid-stream. */
   | { type: 'hello' }
   | { type: 'bye' };

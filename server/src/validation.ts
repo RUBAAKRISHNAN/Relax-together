@@ -77,9 +77,10 @@ const movieSource = z.discriminatedUnion('kind', [
 ]);
 
 const rtcSignal = z.discriminatedUnion('type', [
-  z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().max(20_000) }),
+  z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().max(20_000), sid: z.string().max(32) }),
   z.object({
     type: z.literal('candidate'),
+    sid: z.string().max(32),
     candidate: z.object({
       candidate: z.string().max(1000).optional(),
       sdpMid: z.string().max(64).nullable().optional(),

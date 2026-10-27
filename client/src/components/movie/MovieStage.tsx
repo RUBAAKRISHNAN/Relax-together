@@ -5,7 +5,7 @@ import type { MovieReadyState, RoomSnapshot, SubtitleTrack } from '@shared/types
 import type { FloatingReaction, RoomActions } from '../../hooks/useRoomSession';
 import { fingerprintFile, formatBytes } from '../../lib/fingerprint';
 import { formatTime } from '../../lib/format';
-import { StreamHost, StreamViewer, captureVideo } from '../../lib/movieStream';
+import { StreamHost, StreamViewer, type ViewerState, captureVideo } from '../../lib/movieStream';
 import type { AppSocket } from '../../lib/socket';
 import { parseSubtitles } from '../../lib/subtitles';
 import type { EngineState, SyncEngine } from '../../lib/syncEngine';
@@ -53,7 +53,7 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
   const [pickerOpen, setPickerOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [streamState, setStreamState] = useState<RTCPeerConnectionState | 'waiting'>('waiting');
+  const [streamState, setStreamState] = useState<ViewerState>('waiting');
   const [streamNeedsTap, setStreamNeedsTap] = useState(false);
   const [streamMuted, setStreamMuted] = useState(false);
   const [peerStates, setPeerStates] = useState<Record<string, RTCPeerConnectionState>>({});
@@ -290,7 +290,8 @@ export function MovieStage({ engine, state, snapshot, selfId, isHost, reactions,
                   </div>
                 ) : (
                   <p className="flex items-center gap-2 font-semibold">
-                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden /> Connecting to {host?.name ?? 'the host'}'s stream…
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+                    {streamState === 'retrying' ? 'Reconnecting' : 'Connecting'} to {host?.name ?? 'the host'}'s stream…
                   </p>
                 )}
               </div>

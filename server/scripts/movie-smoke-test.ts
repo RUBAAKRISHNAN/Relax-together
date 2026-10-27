@@ -93,7 +93,7 @@ async function main() {
 
   // WebRTC signalling relay: only host <-> viewer.
   const toViewer = new Promise<unknown>((r) => viewer.once('rtc:signal', r));
-  host.emit('rtc:signal', { to: 'movie-viewer-01', signal: { type: 'offer', sdp: 'v=0' } });
+  host.emit('rtc:signal', { to: 'movie-viewer-01', signal: { type: 'offer', sdp: 'v=0', sid: 'test' } });
   const relayed = (await Promise.race([toViewer, sleep(1500).then(() => null)])) as { from: string } | null;
   check('host → viewer signalling is relayed', relayed?.from === 'movie-host-0001');
   let leaked = false;

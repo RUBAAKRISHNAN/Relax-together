@@ -16,6 +16,7 @@ import { fetchVideoMeta } from './oembed';
 import { IpRateLimiter } from './rateLimiter';
 import { RoomStore, positionAt } from './roomStore';
 import { registerSocketHandlers } from './socketHandlers';
+import { getIceServers, turnProvider } from './turn';
 import { UploadStore } from './uploads';
 import { schemas } from './validation';
 import { searchYouTube } from './youtubeSearch';
@@ -33,6 +34,7 @@ const suggestLimiter = new IpRateLimiter({ capacity: 20, refillPerSec: 30 / 60 }
 const searchLimiter = new IpRateLimiter({ capacity: 30, refillPerSec: 40 / 60 });
 const uploadLimiter = new IpRateLimiter({ capacity: 15, refillPerSec: 15 / 600 });
 const subtitleLimiter = new IpRateLimiter({ capacity: 5, refillPerSec: 5 / 600 });
+const iceLimiter = new IpRateLimiter({ capacity: 30, refillPerSec: 30 / 60 });
 const FILE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const app = express();
@@ -102,6 +104,16 @@ app.get('/api/videos/:id/suggestions', async (req, res) => {
   res.set('Cache-Control', 'public, max-age=120');
   const body: SuggestionsResponse = { videoId: id, isLive: info?.isLive ?? false, suggestions };
   res.json(body);
+});
+
+/** ICE servers (STUN, plus short-lived TURN credentials when configured) for peer-to-peer movie streams. */
+app.get('/api/ice', async (req, res) => {
+  if (!iceLimiter.take(req.ip ?? 'unknown')) {
+    res.status(429).json({ error: 'Too many requests.' });
+    return;
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ iceServers: await getIceServers(), relay: turnProvider() !== null });
 });
 
 /** Song search for music rooms (YouTube results, best matches first). */
@@ -268,6 +280,7 @@ const registered = registerSocketHandlers(io, store, uploads);
 httpServer.listen(PORT, () => {
   console.log(`[relax-together] server listening on :${PORT} (${IS_PROD ? 'production' : 'development'})`);
   if (IS_PROD) console.log(`[relax-together] allowed origins: ${CLIENT_URLS.join(', ')}`);
+  console.log(`[relax-together] TURN relay: ${turnProvider() ?? 'not configured (STUN only)'}`);
 });
 
 const shutdown = () => {

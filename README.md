@@ -43,7 +43,7 @@ cp client/.env.example client/.env
 | `CLIENT_URL`      | server | Allowed browser origin(s) for CORS, comma-separated. Enforced in production only |
 | `NODE_ENV`        | server | `production` turns on strict CORS                                                |
 | `VITE_SERVER_URL` | client | URL of the server. Defaults to `http://<page-host>:3001` in dev                  |
-| `VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL` | client | Optional TURN relay for "stream from my device" on networks that block peer-to-peer |
+| `TURN_CLOUDFLARE_KEY_ID` + `TURN_CLOUDFLARE_API_TOKEN` (or `TURN_METERED_DOMAIN` + `TURN_METERED_API_KEY`, or `TURN_URLS`/`TURN_USERNAME`/`TURN_CREDENTIAL`) | server | Optional TURN relay for "stream from my device" on mobile data / strict networks; see `server/.env.example` |
 
 ### Scripts
 
@@ -239,7 +239,9 @@ Uploading full movies to a server (1–4 GB each, re-sent to every viewer) would
 ### Stream from my device
 
 - The server only relays the small signalling messages (offer/answer/ICE), and only between the host and a viewer. Viewers can't signal each other.
-- Peer-to-peer works on most home networks using public STUN. Some strict corporate or mobile networks need a **TURN relay**: set `VITE_TURN_URL`, `VITE_TURN_USERNAME` and `VITE_TURN_CREDENTIAL` on the client (for example from a managed TURN service, or your own coturn). Without TURN, an affected viewer sees "couldn't connect" with a retry button.
+- **Session ids:** every connection attempt has its own id, carried by its answer and ICE candidates. Messages from an older attempt are ignored, so a viewer's "hello" racing the host's viewer list (or a retry) can't cross-wire two handshakes. Early candidates are queued by session until their offer is applied.
+- **Self-healing:** viewers retry with backoff if a connection fails, drops for more than 5 s, or never gets an offer, and they re-ask after a socket reconnect. The host replaces a viewer's connection whenever that viewer says hello.
+- **TURN relay:** peer-to-peer works on most home networks using STUN. Mobile data and strict NATs need a **TURN relay**. Configure one provider on the *server* (Cloudflare Realtime TURN, Metered, or your own coturn; see `server/.env.example`). The server hands out short-lived credentials at `/api/ice`, so no secret ends up in the website. Without TURN, an affected viewer sees "couldn't connect" with a retry button.
 - Hosting needs `captureStream()`: Chrome, Edge, Firefox or Safari 17+. Viewers can use any modern browser.
 
 ### Subtitles and theatre
